@@ -271,29 +271,51 @@ func (p *Provider) PollCode(h Handle, maxWait time.Duration) (string, error) {
 func (p *Provider) fetch(h Handle) (string, error) {
 	switch h.Kind {
 	case "custom":
-		u := strings.TrimRight(p.cfg.API, "/") + "/check/" + url.PathEscape(h.Email)
-		req, err := http.NewRequest(http.MethodGet, u, nil)
-		if err != nil {
-			return "", err
+		apiBase := strings.TrimRight(p.cfg.API, "/")
+		urlsToTry := []string{
+			apiBase + "/check/" + url.PathEscape(h.Email),
+			apiBase + "/api/mails?mail=" + url.QueryEscape(h.Email),
+			apiBase + "/api/messages?to=" + url.QueryEscape(h.Email),
 		}
-		if p.cfg.Password != "" {
-			req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
-			req.Header.Set("X-Api-Key", p.cfg.Password)
+		if strings.Contains(apiBase, "/api/mails") || strings.Contains(apiBase, "/api/messages") {
+			urlsToTry = []string{apiBase}
 		}
-		resp, err := p.cfg.HTTPClient.Do(req)
-		if err != nil {
-			return "", err
+
+		var lastText string
+		for _, u := range urlsToTry {
+			req, err := http.NewRequest(http.MethodGet, u, nil)
+			if err != nil {
+				continue
+			}
+			if p.cfg.Password != "" {
+				req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
+				req.Header.Set("X-Api-Key", p.cfg.Password)
+				req.Header.Set("x-custom-auth", p.cfg.Password)
+				req.Header.Set("x-admin-passcode", p.cfg.Password)
+			}
+			resp, err := p.cfg.HTTPClient.Do(req)
+			if err != nil {
+				continue
+			}
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			_ = resp.Body.Close()
+			if resp.StatusCode != 200 {
+				continue
+			}
+			// 1. Direct {"code": "123456"} JSON response
+			var doc map[string]any
+			if err := json.Unmarshal(body, &doc); err == nil {
+				if c, _ := doc["code"].(string); c != "" {
+					return c, nil
+				}
+			}
+			// 2. dreamhunter2333/cloudflare_temp_email & array/text response
+			lastText = string(body)
+			if code := extractCode(lastText); code != "" {
+				return code, nil
+			}
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return "", fmt.Errorf("status %d", resp.StatusCode)
-		}
-		var doc map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&doc)
-		if c, _ := doc["code"].(string); c != "" {
-			return c, nil
-		}
-		return "", nil
+		return lastText, nil
 	case "lol":
 		resp, err := p.cfg.HTTPClient.Get("https://api.tempmail.lol/v2/inbox?token=" + url.QueryEscape(h.Token))
 		if err != nil {
