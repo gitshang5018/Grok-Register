@@ -515,47 +515,67 @@ func (p *Provider) fetchCFDomains() ([]string, error) {
 		return nil, fmt.Errorf("EMAIL_API is empty")
 	}
 	apiBase := strings.TrimRight(p.cfg.API, "/")
-	u := apiBase + "/open_api/settings"
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	if p.cfg.Password != "" {
-		req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
-		req.Header.Set("X-Api-Key", p.cfg.Password)
-		req.Header.Set("x-custom-auth", p.cfg.Password)
-		req.Header.Set("x-admin-passcode", p.cfg.Password)
-	}
-	resp, err := p.cfg.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var doc map[string]any
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, err
+	endpoints := []string{
+		apiBase + "/open_api/settings",
+		apiBase + "/api/domains",
 	}
 
-	var doms []string
-	if list, ok := doc["defaultDomains"].([]any); ok {
-		for _, item := range list {
-			if s, ok := item.(string); ok && s != "" {
-				s = strings.TrimSpace(s)
-				s = strings.TrimPrefix(s, "@")
-				if s != "" {
-					doms = append(doms, s)
+	for _, u := range endpoints {
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			continue
+		}
+		if p.cfg.Password != "" {
+			req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
+			req.Header.Set("X-Api-Key", p.cfg.Password)
+			req.Header.Set("x-custom-auth", p.cfg.Password)
+			req.Header.Set("x-admin-passcode", p.cfg.Password)
+			req.Header.Set("x-admin-auth", p.cfg.Password)
+		}
+		resp, err := p.cfg.HTTPClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode != 200 {
+			continue
+		}
+
+		var doms []string
+		// 1. Array response directly or {"results": [...]} / {"data": [...]} / {"defaultDomains": [...]}
+		var anyVal any
+		if err := json.Unmarshal(body, &anyVal); err == nil {
+			var list []any
+			if arr, ok := anyVal.([]any); ok {
+				list = arr
+			} else if doc, ok := anyVal.(map[string]any); ok {
+				if d, ok := doc["defaultDomains"].([]any); ok {
+					list = d
+				} else if d, ok := doc["results"].([]any); ok {
+					list = d
+				} else if d, ok := doc["data"].([]any); ok {
+					list = d
+				}
+			}
+			for _, item := range list {
+				if s, ok := item.(string); ok && s != "" {
+					s = strings.TrimSpace(strings.TrimPrefix(s, "@"))
+					if s != "" {
+						doms = append(doms, s)
+					}
+				} else if m, ok := item.(map[string]any); ok {
+					if dom, ok := m["domain"].(string); ok && dom != "" {
+						doms = append(doms, strings.TrimSpace(dom))
+					}
 				}
 			}
 		}
+		if len(doms) > 0 {
+			return doms, nil
+		}
 	}
-	if len(doms) > 0 {
-		return doms, nil
-	}
-	return nil, fmt.Errorf("no domains found in /open_api/settings")
+	return nil, fmt.Errorf("未能从 /open_api/settings 或 /api/domains 自动获取到有效域名")
 }
 
 func (p *Provider) cfTempCreate(password string) (Handle, error) {
