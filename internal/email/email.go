@@ -270,14 +270,21 @@ func (p *Provider) mailtmCreate(base, password string) (Handle, error) {
 
 func (p *Provider) PollCode(h Handle, maxWait time.Duration) (string, error) {
 	deadline := time.Now().Add(maxWait)
+	var lastText string
 	for time.Now().Before(deadline) {
 		text, err := p.fetch(h)
 		if err == nil && text != "" {
 			if code := extractCode(text); code != "" {
 				return code, nil
 			}
+			lastText = text
+		} else if err != nil {
+			lastText = err.Error()
 		}
-		time.Sleep(time.Second)
+		time.Sleep(2 * time.Second)
+	}
+	if lastText != "" {
+		return "", fmt.Errorf("验证码超时 [%s]", lastText)
 	}
 	return "", fmt.Errorf("验证码超时")
 }
@@ -297,7 +304,7 @@ func (p *Provider) fetch(h Handle) (string, error) {
 			urlsToTry = []string{apiBase}
 		}
 
-		var lastText string
+		var lastDiag string
 		for _, u := range urlsToTry {
 			uReq := u
 			if p.cfg.Password != "" {
@@ -309,6 +316,7 @@ func (p *Provider) fetch(h Handle) (string, error) {
 			}
 			req, err := http.NewRequest(http.MethodGet, uReq, nil)
 			if err != nil {
+				lastDiag = fmt.Sprintf("req err: %v", err)
 				continue
 			}
 			if p.cfg.Password != "" {
@@ -319,11 +327,13 @@ func (p *Provider) fetch(h Handle) (string, error) {
 			}
 			resp, err := p.cfg.HTTPClient.Do(req)
 			if err != nil {
+				lastDiag = fmt.Sprintf("do err: %v", err)
 				continue
 			}
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 			_ = resp.Body.Close()
 			if resp.StatusCode != 200 {
+				lastDiag = fmt.Sprintf("http %d url=%s body=%s", resp.StatusCode, u, truncate(string(body), 80))
 				continue
 			}
 			// 1. Direct {"code": "123456"} JSON response
@@ -334,12 +344,13 @@ func (p *Provider) fetch(h Handle) (string, error) {
 				}
 			}
 			// 2. dreamhunter2333/cloudflare_temp_email & array/text response
-			lastText = string(body)
-			if code := extractCode(lastText); code != "" {
+			raw := string(body)
+			if code := extractCode(raw); code != "" {
 				return code, nil
 			}
+			lastDiag = fmt.Sprintf("status 200 body=%s", truncate(raw, 100))
 		}
-		return lastText, nil
+		return lastDiag, nil
 	case "lol":
 		resp, err := p.cfg.HTTPClient.Get("https://api.tempmail.lol/v2/inbox?token=" + url.QueryEscape(h.Token))
 		if err != nil {
