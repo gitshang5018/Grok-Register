@@ -467,8 +467,8 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			return err
 		}
 		c.setFormHeaders(req2, consentRef, cookie)
-		// Also send Origin as auth.x.ai sometimes required for same-site form posts
-		req2.Header.Set("Origin", "https://accounts.x.ai")
+		// Dynamic Origin header matching request host (auth.x.ai) to satisfy CORS / same-origin security
+		req2.Header.Set("Origin", "https://"+req2.URL.Host)
 		resp2, err := c.http.Do(req2)
 		if err != nil {
 			return err
@@ -872,12 +872,18 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 		cred, err := c.PollToken(ctx, flow)
 		if err != nil {
 			last = err
-			// invalid_grant: consent did not stick — new device flow after brief settle
+			// invalid_grant: consent did not stick — settle & re-approve before new device flow
 			if attempt < 2 && strings.Contains(err.Error(), "invalid_grant") {
 				select {
 				case <-ctx.Done():
 					return Credential{}, ctx.Err()
-				case <-time.After(2 * time.Second):
+				case <-time.After(3 * time.Second):
+				}
+				// Retry ConfirmHTTP with SSO to let auth.x.ai session sync complete
+				if reErr := c.ConfirmHTTP(ctx, sso, flow); reErr == nil {
+					if cred2, err2 := c.PollToken(ctx, flow); err2 == nil {
+						return cred2, nil
+					}
 				}
 				continue
 			}

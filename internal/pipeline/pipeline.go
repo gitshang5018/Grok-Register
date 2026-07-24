@@ -817,12 +817,12 @@ func (e *Engine) cWorker(ctx context.Context, id int, scfg protocol.SignupConfig
 		}
 		n := e.ssoN.Add(1)
 		log.OKf("注册成功 #%d %s", n, q.Email)
-		// Brief settle: brand-new SSO sometimes rejected by auth.x.ai device verify (→ sign-in / invalid_grant).
+		// Brief settle: brand-new SSO needs ~3.5s for auth.x.ai session sync across clusters.
 		select {
 		case <-ctx.Done():
 			e.releaseReserve()
 			return
-		case <-time.After(2 * time.Second):
+		case <-time.After(3500 * time.Millisecond):
 		}
 
 		job := SSOJob{Email: q.Email, Password: q.Password, SSO: sso}
