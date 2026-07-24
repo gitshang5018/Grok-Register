@@ -663,7 +663,16 @@ func locationError(loc string) error {
 	if err != nil {
 		return nil
 	}
-	e := u.Query().Get("error")
+	q := u.Query()
+	e := q.Get("error")
+	p := q.Get("policy")
+	risk := q.Get("risk")
+	if p == "deny" {
+		if risk != "" {
+			return fmt.Errorf("policy=deny (risk=%s)", risk)
+		}
+		return fmt.Errorf("policy=deny")
+	}
 	if e == "" {
 		return nil
 	}
@@ -761,10 +770,26 @@ func (c *Client) PollToken(ctx context.Context, flow DeviceFlow) (Credential, er
 }
 
 func credentialFrom(doc map[string]any, endpoint string) (Credential, error) {
+	// Handle policy field (e.g. policy=deny, risk=1.00)
+	if p, ok := doc["policy"].(string); ok && strings.EqualFold(p, "deny") {
+		risk, _ := doc["risk"].(string)
+		if risk != "" {
+			return Credential{}, fmt.Errorf("policy_deny: policy=deny, risk=%s", risk)
+		}
+		return Credential{}, fmt.Errorf("policy_deny: policy=deny")
+	}
+
 	at, _ := doc["access_token"].(string)
 	rt, _ := doc["refresh_token"].(string)
 	if at == "" || rt == "" {
-		return Credential{}, fmt.Errorf("oauth_rejected: missing tokens")
+		if p, ok := doc["policy"].(string); ok && p != "" {
+			return Credential{}, fmt.Errorf("policy_deny: no_token (policy=%s)", p)
+		}
+		return Credential{}, fmt.Errorf("oauth_rejected: missing tokens (no_token)")
+	}
+
+	if strings.Contains(at, "invalid_token") || len(at) < 20 {
+		return Credential{}, fmt.Errorf("oauth_rejected: invalid_token (fake clean token)")
 	}
 	id, _ := doc["id_token"].(string)
 	tt, _ := doc["token_type"].(string)
