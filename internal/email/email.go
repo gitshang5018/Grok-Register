@@ -321,6 +321,7 @@ func (p *Provider) fetch(h Handle) (string, error) {
 				req.Header.Set("X-Api-Key", p.cfg.Password)
 				req.Header.Set("x-custom-auth", p.cfg.Password)
 				req.Header.Set("x-admin-passcode", p.cfg.Password)
+				req.Header.Set("x-admin-auth", p.cfg.Password)
 			}
 			resp, err := p.cfg.HTTPClient.Do(req)
 			if err != nil {
@@ -579,6 +580,7 @@ func (p *Provider) cfTempCreate(password string) (Handle, error) {
 			req.Header.Set("X-Api-Key", p.cfg.Password)
 			req.Header.Set("x-custom-auth", p.cfg.Password)
 			req.Header.Set("x-admin-passcode", p.cfg.Password)
+			req.Header.Set("x-admin-auth", p.cfg.Password)
 		}
 		resp, err := p.cfg.HTTPClient.Do(req)
 		if err != nil {
