@@ -285,17 +285,18 @@ func (p *Provider) fetch(h Handle) (string, error) {
 	case "custom":
 		apiBase := strings.TrimRight(p.cfg.API, "/")
 		urlsToTry := []string{
-			apiBase + "/admin/mails?mail=" + url.QueryEscape(h.Email),
+			apiBase + "/api/mails?limit=20&offset=0",
 			apiBase + "/api/mails?mail=" + url.QueryEscape(h.Email),
+			apiBase + "/admin/mails?mail=" + url.QueryEscape(h.Email),
 			apiBase + "/api/mail?address=" + url.QueryEscape(h.Email),
 			apiBase + "/check/" + url.PathEscape(h.Email),
-			apiBase + "/api/messages?to=" + url.QueryEscape(h.Email),
 		}
 		if strings.Contains(apiBase, "/admin/mails") || strings.Contains(apiBase, "/api/mails") || strings.Contains(apiBase, "/api/messages") {
 			urlsToTry = []string{apiBase}
 		}
 
 		var lastDiag string
+		var hadSuccess200 bool
 		for _, u := range urlsToTry {
 			uReq := u
 			if p.cfg.Password != "" {
@@ -307,7 +308,9 @@ func (p *Provider) fetch(h Handle) (string, error) {
 			}
 			req, err := http.NewRequest(http.MethodGet, uReq, nil)
 			if err != nil {
-				lastDiag = fmt.Sprintf("req err: %v", err)
+				if !hadSuccess200 {
+					lastDiag = fmt.Sprintf("req err: %v", err)
+				}
 				continue
 			}
 			token := h.Token
@@ -325,15 +328,20 @@ func (p *Provider) fetch(h Handle) (string, error) {
 			}
 			resp, err := p.cfg.HTTPClient.Do(req)
 			if err != nil {
-				lastDiag = fmt.Sprintf("do err: %v", err)
+				if !hadSuccess200 {
+					lastDiag = fmt.Sprintf("do err: %v", err)
+				}
 				continue
 			}
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 			_ = resp.Body.Close()
 			if resp.StatusCode != 200 {
-				lastDiag = fmt.Sprintf("http %d url=%s body=%s", resp.StatusCode, u, truncate(string(body), 80))
+				if !hadSuccess200 {
+					lastDiag = fmt.Sprintf("http %d url=%s body=%s", resp.StatusCode, u, truncate(string(body), 80))
+				}
 				continue
 			}
+			hadSuccess200 = true
 			// 1. Direct {"code": "123456"} JSON response
 			var doc map[string]any
 			if err := json.Unmarshal(body, &doc); err == nil {
@@ -346,7 +354,7 @@ func (p *Provider) fetch(h Handle) (string, error) {
 			if code := extractCode(raw); code != "" {
 				return code, nil
 			}
-			lastDiag = fmt.Sprintf("status 200 body=%s", truncate(raw, 100))
+			lastDiag = fmt.Sprintf("HTTP 200 (接口连通正常, 正在等待验证码邮件, 当前收件箱: %s)", truncate(raw, 70))
 		}
 		return lastDiag, nil
 	case "lol":
