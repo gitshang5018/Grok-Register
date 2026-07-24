@@ -51,6 +51,7 @@ type Config struct {
 	Mode          config.EmailMode
 	Domain        string
 	API           string
+	Password      string
 	LOLRetries    int
 	LOLIntervalMS int
 	// testmail.app
@@ -271,7 +272,15 @@ func (p *Provider) fetch(h Handle) (string, error) {
 	switch h.Kind {
 	case "custom":
 		u := strings.TrimRight(p.cfg.API, "/") + "/check/" + url.PathEscape(h.Email)
-		resp, err := p.cfg.HTTPClient.Get(u)
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			return "", err
+		}
+		if p.cfg.Password != "" {
+			req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
+			req.Header.Set("X-Api-Key", p.cfg.Password)
+		}
+		resp, err := p.cfg.HTTPClient.Do(req)
 		if err != nil {
 			return "", err
 		}

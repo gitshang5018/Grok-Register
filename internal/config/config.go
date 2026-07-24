@@ -22,9 +22,10 @@ const (
 )
 
 type Config struct {
-	EmailMode   EmailMode
-	EmailDomain string
-	EmailAPI    string
+	EmailMode     EmailMode
+	EmailDomain   string
+	EmailAPI      string
+	EmailPassword string
 
 	// testmail.app (GitHub Student Pack Essential etc.)
 	TestmailAPIKey    string
@@ -410,6 +411,12 @@ func applyMap(cfg *Config, env map[string]string) {
 	}
 	if v, ok := env["EMAIL_API"]; ok {
 		cfg.EmailAPI = v
+	}
+	if v, ok := env["EMAIL_PASSWORD"]; ok {
+		cfg.EmailPassword = v
+	}
+	if v, ok := env["EMAIL_KEY"]; ok && cfg.EmailPassword == "" {
+		cfg.EmailPassword = v
 	}
 	if v, ok := env["TESTMAIL_API_KEY"]; ok {
 		cfg.TestmailAPIKey = v

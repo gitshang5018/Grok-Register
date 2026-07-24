@@ -303,6 +303,7 @@ func (e *Engine) run(ctx context.Context) error {
 		Mode:              cfg.EmailMode,
 		Domain:            cfg.EmailDomain,
 		API:               cfg.EmailAPI,
+		Password:          cfg.EmailPassword,
 		LOLRetries:        cfg.TempmailLOLRetries,
 		LOLIntervalMS:     cfg.TempmailLOLIntervalMS,
 		TestmailAPIKey:    cfg.TestmailAPIKey,
