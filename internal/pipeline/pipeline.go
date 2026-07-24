@@ -23,6 +23,7 @@ import (
 	"github.com/grok-free-register/grok-reg/internal/oauth"
 	"github.com/grok-free-register/grok-reg/internal/protocol"
 	"github.com/grok-free-register/grok-reg/internal/state"
+	"github.com/grok-free-register/grok-reg/internal/sub2api"
 	"github.com/grok-free-register/grok-reg/internal/turnstile"
 )
 
@@ -51,17 +52,18 @@ type Options struct {
 type Engine struct {
 	opt Options
 
-	cm       *clearance.Manager
-	xai      *protocol.Client
-	mail     *email.Provider
-	turn     turnstile.Provider
-	oauth    *oauth.Client
-	inv      *inventory.Inventory[string, QItem]
-	phys     *inventory.Semaphore
-	qPending *inventory.Semaphore
+	cm              *clearance.Manager
+	xai             *protocol.Client
+	mail            *email.Provider
+	turn            turnstile.Provider
+	oauth           *oauth.Client
+	inv             *inventory.Inventory[string, QItem]
+	phys            *inventory.Semaphore
+	qPending        *inventory.Semaphore
 
-	oauthCh  chan SSOJob
-	uploader *cpa.Uploader
+	oauthCh         chan SSOJob
+	uploader        *cpa.Uploader
+	sub2apiUploader *sub2api.Uploader
 
 	done     atomic.Int64 // CPA successes (counts toward -t)
 	reserved atomic.Int64 // in-flight accounts (email→register→oauth→probe)
@@ -73,11 +75,12 @@ type Engine struct {
 	oauthGateMu    sync.Mutex
 	oauthLastStart time.Time
 
-	start    time.Time
-	wgReg    sync.WaitGroup // S/P/C
-	wgOAuth  sync.WaitGroup
-	wgAux    sync.WaitGroup // status ticker etc
-	wgUpload sync.WaitGroup // async CPA management uploads
+	start       time.Time
+	wgReg       sync.WaitGroup // S/P/C
+	wgOAuth     sync.WaitGroup
+	wgAux       sync.WaitGroup // status ticker etc
+	wgUpload    sync.WaitGroup // async CPA management uploads
+	wgSub2API   sync.WaitGroup // async SUB2API imports
 }
 
 // remainingCapacity = target - done - reserved (how many new accounts may start).
@@ -343,6 +346,19 @@ func (e *Engine) run(ctx context.Context) error {
 	if e.uploader.Enabled() {
 		log.Infof("CPA upload enabled base=%s", cfg.CPAManagementBase)
 	}
+	e.sub2apiUploader = sub2api.NewUploader(sub2api.Config{
+		Enabled:    cfg.Sub2APIEnabled,
+		BaseURL:    cfg.Sub2APIBaseURL,
+		Key:        cfg.Sub2APIKey,
+		Path:       cfg.Sub2APIPath,
+		TimeoutSec: cfg.Sub2APITimeoutSec,
+		Retries:    cfg.Sub2APIRetries,
+	}, func(f string, a ...any) {
+		log.Infof(f, a...)
+	})
+	if e.sub2apiUploader.Enabled() {
+		log.Infof("SUB2API auto import enabled base=%s endpoint=%s", cfg.Sub2APIBaseURL, e.sub2apiUploader.Endpoint())
+	}
 	e.oauth, err = oauth.NewClient(cfg.RegisterProxy, e.cm, time.Duration(cfg.OAuthRetrySec)*time.Second)
 	if err != nil {
 		return err
@@ -520,6 +536,7 @@ shutdown:
 		log.Infof("[cpa] 等待 Management 上传完成（最多 %s）…", uploadWait)
 	}
 	waitGroupTimeout(&e.wgUpload, uploadWait, log, "cpa upload")
+	waitGroupTimeout(&e.wgSub2API, uploadWait, log, "sub2api import")
 	waitGroupTimeout(&e.wgAux, 3*time.Second, log, "aux")
 
 	_ = st.Set(func(s *state.Snapshot) {
@@ -930,6 +947,24 @@ func (e *Engine) oauthWorker(ctx context.Context, id int) {
 					log.OKf("[cpa] 已入库 %s → %s", docCopy.Email, res.Name)
 				} else {
 					log.OKf("[cpa] 已上传 %s → %s（列表校验未命中，可能仍成功）", docCopy.Email, res.Name)
+				}
+			}()
+		}
+		if e.sub2apiUploader != nil && e.sub2apiUploader.Enabled() {
+			s2a := e.sub2apiUploader
+			docCopy := doc
+			e.wgSub2API.Add(1)
+			go func() {
+				defer e.wgSub2API.Done()
+				defer func() { _ = recover() }()
+				log.Infof("[sub2api] 开始自动导入 %s …", docCopy.Email)
+				res := s2a.ImportDocument(docCopy)
+				if res.Err != nil {
+					log.Warnf("[sub2api] 自动导入失败 %s: %v", docCopy.Email, res.Err)
+				} else if !res.OK {
+					log.Warnf("[sub2api] 自动导入失败 %s status=%d body=%s", docCopy.Email, res.Status, truncateRunes(res.Body, 180))
+				} else {
+					log.OKf("[sub2api] 自动导入成功 %s", docCopy.Email)
 				}
 			}()
 		}

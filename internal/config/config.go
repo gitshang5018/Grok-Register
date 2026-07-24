@@ -84,6 +84,14 @@ type Config struct {
 	CPAUploadNameTemplate string
 	CPAUploadVerify       bool
 	CPAUploadMode         string // multipart | json
+
+	// SUB2API Auto Import
+	Sub2APIEnabled    bool
+	Sub2APIBaseURL    string
+	Sub2APIKey        string
+	Sub2APIPath       string
+	Sub2APITimeoutSec int
+	Sub2APIRetries    int
 }
 
 func Defaults() Config {
@@ -125,6 +133,11 @@ func Defaults() Config {
 		CPAUploadNameTemplate: "{email}.json",
 		CPAUploadVerify:       true,
 		CPAUploadMode:         "multipart",
+		Sub2APIEnabled:        false,
+		Sub2APIBaseURL:        "http://127.0.0.1:8000",
+		Sub2APIPath:           "/api/v1/admin/accounts/import",
+		Sub2APITimeoutSec:     30,
+		Sub2APIRetries:        2,
 	}
 }
 
@@ -259,6 +272,12 @@ func Save(path string, cfg Config) error {
 	if cfg.CPAUploadMode != "" {
 		b.WriteString(fmt.Sprintf("CPA_UPLOAD_MODE=%s\n", cfg.CPAUploadMode))
 	}
+	b.WriteString(fmt.Sprintf("SUB2API_ENABLED=%s\n", bool01(cfg.Sub2APIEnabled)))
+	b.WriteString(fmt.Sprintf("SUB2API_BASE_URL=%s\n", cfg.Sub2APIBaseURL))
+	// SUB2API_KEY: never auto-written (set manually in config.env)
+	b.WriteString(fmt.Sprintf("SUB2API_PATH=%s\n", cfg.Sub2APIPath))
+	b.WriteString(fmt.Sprintf("SUB2API_TIMEOUT_SEC=%d\n", cfg.Sub2APITimeoutSec))
+	b.WriteString(fmt.Sprintf("SUB2API_RETRIES=%d\n", cfg.Sub2APIRetries))
 	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
@@ -523,6 +542,28 @@ func applyMap(cfg *Config, env map[string]string) {
 	}
 	if v, ok := env["CPA_UPLOAD_MODE"]; ok {
 		cfg.CPAUploadMode = v
+	}
+	if v, ok := env["SUB2API_ENABLED"]; ok {
+		cfg.Sub2APIEnabled = truthy(v)
+	}
+	if v, ok := env["SUB2API_BASE_URL"]; ok {
+		cfg.Sub2APIBaseURL = v
+	}
+	if v, ok := env["SUB2API_KEY"]; ok {
+		cfg.Sub2APIKey = v
+	}
+	if v, ok := env["SUB2API_PATH"]; ok {
+		cfg.Sub2APIPath = v
+	}
+	if v, ok := env["SUB2API_TIMEOUT_SEC"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Sub2APITimeoutSec = n
+		}
+	}
+	if v, ok := env["SUB2API_RETRIES"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Sub2APIRetries = n
+		}
 	}
 }
 

@@ -18,8 +18,8 @@ import (
 	"github.com/grok-free-register/grok-reg/internal/home"
 	"github.com/grok-free-register/grok-reg/internal/logx"
 	"github.com/grok-free-register/grok-reg/internal/pipeline"
-	"github.com/grok-free-register/grok-reg/internal/reoauth"
 	"github.com/grok-free-register/grok-reg/internal/state"
+	"github.com/grok-free-register/grok-reg/internal/sub2api"
 )
 
 func runCmd(bin string, args ...string) error {
@@ -70,11 +70,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
-	case "reoauth", "reauth", "relogin":
-		if err := cmdReoauth(args[1:]); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
-			os.Exit(1)
-		}
 	case "config":
 		if err := cmdConfig(); err != nil {
 			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -103,7 +98,6 @@ func printHelp() {
   grok logs [-f] [--debug|--info|--warn|--error]
                                   查看最近一次运行日志；-f 实时跟踪
   grok upload                     选择最近 run 的 CPA JSON 上传到 Management API
-  grok reoauth <path>             对 inspection/CPA/accounts 重登并写出新 CPA
   grok config                     打开 ~/.grok/config.env（并刷新 config.env.example）
   grok help                       显示帮助
 
@@ -113,7 +107,6 @@ func printHelp() {
   logs 等级:      默认 --info（隐藏 DBG）；--debug 显示全部；--warn / --error 更严
                   例: grok logs -f --debug
   默认节奏:       OAUTH_MIN_INTERVAL_SEC=6  PROBE_WARMUP_SEC=5  OAUTH_RETRY_SEC=60
-  reoauth:        优先 refresh_token；否则 SSO device；配置了 CPA 上传则自动入库
   升级后请查看 ~/.grok/config.env.example 了解新增配置项
 
 数据目录: ~/.grok/ (可用 GROK_HOME 覆盖)
@@ -707,222 +700,6 @@ func latestLog(dir string) string {
 	return best
 }
 
-func cmdReoauth(args []string) error {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Print(`grok reoauth — 对已有账号重新拿 CPA 凭证（重登）
-
-用法:
-  grok reoauth <path> [选项]
-
-<path> 可以是:
-  · inspection 导出 JSON（含 results[].email，如 quota_exhausted 报告）
-  · 单个 CPA JSON（xai-*.json，含 refresh_token）
-  · CPA/ 目录 或 整个 run 目录（含 SSO/accounts.txt）
-  · accounts.txt（email:password:sso）
-  · auth-sessions.jsonl
-
-策略:
-  1) 有 refresh_token → OAuth refresh_token 换新 token（无需邮箱验证码）
-  2) 否则有 sso → device OAuth（与注册机相同）
-  3) inspection 仅 email 时，自动在 ~/.grok/outputs 里按 email 查找历史 CPA/SSO
-  4) 若 config 启用了 CPA 上传（CPA_UPLOAD_ENABLED + KEY），成功后自动入库 Management API
-
-选项:
-  --thread N / -j N   并发 (1-8，默认 2)
-  --out DIR           CPA 输出目录（默认 ~/.grok/outputs/reoauth-<时间>/CPA）
-  --no-lookup         不扫描本地 outputs 补全凭证
-  --no-probe          写出前不做 cli-chat-proxy 探活
-  --interval SEC      两次请求最小间隔（默认 2）
-  --upload            强制上传（即使 CPA_UPLOAD_ENABLED=0，仍需 KEY）
-  --no-upload         禁止上传（覆盖 config）
-
-示例:
-  grok reoauth ./grok-inspection-quota_exhausted-....json
-  grok reoauth ~/.grok/outputs/20260723-232838/CPA --thread 3
-  grok reoauth ~/.grok/outputs/20260723-232838/SSO/accounts.txt --out /tmp/cpa-re
-`)
-		return nil
-	}
-
-	path := ""
-	threads := 2
-	outDir := ""
-	lookup := true
-	probe := true
-	intervalSec := 2.0
-	uploadForce := false
-	uploadOff := false
-
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--thread" || a == "-j":
-			if i+1 >= len(args) {
-				return fmt.Errorf("%s 需要数字", a)
-			}
-			n, err := strconv.Atoi(args[i+1])
-			if err != nil || n < 1 || n > 8 {
-				return fmt.Errorf("无效线程: %s", args[i+1])
-			}
-			threads = n
-			i++
-		case strings.HasPrefix(a, "--thread="):
-			n, err := strconv.Atoi(strings.TrimPrefix(a, "--thread="))
-			if err != nil || n < 1 || n > 8 {
-				return fmt.Errorf("无效线程: %s", a)
-			}
-			threads = n
-		case a == "--out" || a == "-o":
-			if i+1 >= len(args) {
-				return fmt.Errorf("%s 需要目录", a)
-			}
-			outDir = args[i+1]
-			i++
-		case strings.HasPrefix(a, "--out="):
-			outDir = strings.TrimPrefix(a, "--out=")
-		case a == "--no-lookup":
-			lookup = false
-		case a == "--no-probe":
-			probe = false
-		case a == "--upload":
-			uploadForce = true
-		case a == "--no-upload":
-			uploadOff = true
-		case a == "--interval":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--interval 需要秒数")
-			}
-			v, err := strconv.ParseFloat(args[i+1], 64)
-			if err != nil || v < 0 {
-				return fmt.Errorf("无效 interval: %s", args[i+1])
-			}
-			intervalSec = v
-			i++
-		case strings.HasPrefix(a, "--interval="):
-			v, err := strconv.ParseFloat(strings.TrimPrefix(a, "--interval="), 64)
-			if err != nil || v < 0 {
-				return fmt.Errorf("无效 interval: %s", a)
-			}
-			intervalSec = v
-		case a == "-h" || a == "--help":
-			return cmdReoauth(nil)
-		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("未知参数: %s（见 grok reoauth -h）", a)
-		default:
-			if path == "" {
-				path = a
-			} else {
-				return fmt.Errorf("多余参数: %s", a)
-			}
-		}
-	}
-	if path == "" {
-		return fmt.Errorf("需要 path（见 grok reoauth -h）")
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(abs); err != nil {
-		return fmt.Errorf("路径不存在: %s", abs)
-	}
-
-	p, err := paths()
-	if err != nil {
-		return err
-	}
-	cfg, err := config.Load(p.Config)
-	if err != nil {
-		return err
-	}
-	proxy := strings.TrimSpace(cfg.RegisterProxy)
-	if proxy == "" {
-		proxy = strings.TrimSpace(cfg.HTTPSProxy)
-	}
-
-	accs, err := reoauth.ParsePath(abs)
-	if err != nil {
-		return err
-	}
-	if len(accs) == 0 {
-		return fmt.Errorf("未解析到任何账号: %s", abs)
-	}
-	fmt.Printf("[*] 解析到 %d 个账号 from %s\n", len(accs), abs)
-
-	if outDir == "" {
-		runID := "reoauth-" + home.NewRunID()
-		rd, err := p.PrepareRun(runID)
-		if err != nil {
-			return err
-		}
-		outDir = rd.CPA
-		fmt.Printf("[*] 输出目录: %s\n", rd.Root)
-	} else {
-		outDir, _ = filepath.Abs(outDir)
-		if err := os.MkdirAll(outDir, 0o700); err != nil {
-			return err
-		}
-		fmt.Printf("[*] 输出 CPA: %s\n", outDir)
-	}
-
-	var lookupRoots []string
-	if lookup {
-		lookupRoots = []string{p.Outputs}
-	}
-
-	// CPA Management upload: same config as register pipeline.
-	uploadEnabled := cfg.CPAUploadEnabled
-	if uploadForce {
-		uploadEnabled = true
-	}
-	if uploadOff {
-		uploadEnabled = false
-	}
-	var uploader *cpa.Uploader
-	if uploadEnabled {
-		if strings.TrimSpace(cfg.CPAManagementKey) == "" {
-			fmt.Println("[!] CPA 上传已启用但未配置 CPA_MANAGEMENT_KEY，跳过入库")
-		} else {
-			base := cfg.CPAManagementBase
-			if strings.TrimSpace(base) == "" {
-				base = "http://127.0.0.1:8317/v0/management"
-			}
-			uploader = cpa.NewUploader(cpa.UploadConfig{
-				Enabled:      true,
-				BaseURL:      base,
-				Key:          cfg.CPAManagementKey,
-				TimeoutSec:   cfg.CPAUploadTimeoutSec,
-				Retries:      cfg.CPAUploadRetries,
-				NameTemplate: cfg.CPAUploadNameTemplate,
-				Verify:       cfg.CPAUploadVerify,
-				Mode:         cfg.CPAUploadMode,
-			}, func(f string, a ...any) {
-				fmt.Printf("[cpa] "+f+"\n", a...)
-			})
-			if uploader.Enabled() {
-				fmt.Printf("[*] CPA 自动入库: %s\n", cpa.NormalizeManagementBase(base))
-			}
-		}
-	}
-
-	ctx := context.Background()
-	_, err = reoauth.Run(ctx, accs, reoauth.Options{
-		Proxy:       proxy,
-		OutCPA:      outDir,
-		Workers:     threads,
-		MinInterval: time.Duration(intervalSec * float64(time.Second)),
-		Probe:       probe,
-		ProbeWarmup: cfg.ProbeWarmupSec,
-		LookupRoots: lookupRoots,
-		Secret:      cpa.DefaultSecret(),
-		Uploader:    uploader,
-		OutLog: func(f string, a ...any) {
-			fmt.Printf(f+"\n", a...)
-		},
-	})
-	return err
-}
-
 func cmdUpload() error {
 	p, err := paths()
 	if err != nil {
@@ -932,7 +709,7 @@ func cmdUpload() error {
 	if err != nil {
 		return err
 	}
-	// env overrides
+	// env overrides for CPA Management
 	if v := os.Getenv("CPA_UPLOAD_ENABLED"); v != "" {
 		cfg.CPAUploadEnabled = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 	}
@@ -942,12 +719,26 @@ func cmdUpload() error {
 	if v := os.Getenv("CPA_MANAGEMENT_KEY"); v != "" {
 		cfg.CPAManagementKey = v
 	}
-	// interactive upload always allowed if key+base set
-	if strings.TrimSpace(cfg.CPAManagementKey) == "" {
-		return fmt.Errorf("未配置 CPA_MANAGEMENT_KEY（在 ~/.grok/config.env 或环境变量中设置）")
+
+	// env overrides for SUB2API
+	if v := os.Getenv("SUB2API_ENABLED"); v != "" {
+		cfg.Sub2APIEnabled = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 	}
-	if strings.TrimSpace(cfg.CPAManagementBase) == "" {
-		cfg.CPAManagementBase = "http://localhost:8317/v0/management"
+	if v := os.Getenv("SUB2API_BASE_URL"); v != "" {
+		cfg.Sub2APIBaseURL = v
+	}
+	if v := os.Getenv("SUB2API_KEY"); v != "" {
+		cfg.Sub2APIKey = v
+	}
+	if v := os.Getenv("SUB2API_PATH"); v != "" {
+		cfg.Sub2APIPath = v
+	}
+
+	hasCPAKey := strings.TrimSpace(cfg.CPAManagementKey) != ""
+	hasSub2APIKey := strings.TrimSpace(cfg.Sub2APIKey) != ""
+
+	if !hasCPAKey && !hasSub2APIKey {
+		return fmt.Errorf("未配置 CPA_MANAGEMENT_KEY 或 SUB2API_KEY（在 ~/.grok/config.env 或环境变量中设置）")
 	}
 
 	runs, err := cpa.ListRunDirs(p.Outputs, 10)
@@ -971,7 +762,7 @@ func cmdUpload() error {
 		items = append(items, item{dir: dir, name: name, files: files})
 		fmt.Printf("  [%d] %s  CPA文件=%d\n", i+1, name, len(files))
 	}
-	fmt.Print("选择要上传的序号（如 1 或 1,2,3；回车取消）: ")
+	fmt.Print("选择要导入/上传的序号（如 1 或 1,2,3；回车取消）: ")
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimSpace(line)
@@ -985,7 +776,6 @@ func cmdUpload() error {
 		if part == "" {
 			continue
 		}
-		// allow ranges? no — only comma list
 		n, err := strconv.Atoi(part)
 		if err != nil || n < 1 || n > len(items) {
 			return fmt.Errorf("无效序号: %s", part)
@@ -997,37 +787,75 @@ func cmdUpload() error {
 		return nil
 	}
 
-	up := cpa.NewUploader(cpa.UploadConfig{
-		Enabled:      true,
-		BaseURL:      cfg.CPAManagementBase,
-		Key:          cfg.CPAManagementKey,
-		TimeoutSec:   cfg.CPAUploadTimeoutSec,
-		Retries:      cfg.CPAUploadRetries,
-		NameTemplate: cfg.CPAUploadNameTemplate,
-		Verify:       cfg.CPAUploadVerify,
-		Mode:         cfg.CPAUploadMode,
-	}, func(f string, a ...any) {
-		fmt.Printf(f+"\n", a...)
-	})
+	if hasCPAKey {
+		fmt.Println("\n--- 开始上传至 CPA Management ---")
+		up := cpa.NewUploader(cpa.UploadConfig{
+			Enabled:      true,
+			BaseURL:      cfg.CPAManagementBase,
+			Key:          cfg.CPAManagementKey,
+			TimeoutSec:   cfg.CPAUploadTimeoutSec,
+			Retries:      cfg.CPAUploadRetries,
+			NameTemplate: cfg.CPAUploadNameTemplate,
+			Verify:       cfg.CPAUploadVerify,
+			Mode:         cfg.CPAUploadMode,
+		}, func(f string, a ...any) {
+			fmt.Printf(f+"\n", a...)
+		})
 
-	var okN, failN, skipN int
-	for _, idx := range selected {
-		it := items[idx]
-		if len(it.files) == 0 {
-			fmt.Printf("[!] %s 无 CPA json，跳过\n", it.name)
-			skipN++
-			continue
-		}
-		fmt.Printf("[*] 上传 %s (%d 个文件)...\n", it.name, len(it.files))
-		for _, f := range it.files {
-			res := up.UploadFile(f)
-			if res.OK {
-				okN++
-			} else {
-				failN++
+		var okN, failN, skipN int
+		for _, idx := range selected {
+			it := items[idx]
+			if len(it.files) == 0 {
+				fmt.Printf("[!] %s 无 CPA json，跳过\n", it.name)
+				skipN++
+				continue
+			}
+			fmt.Printf("[*] CPA 上传 %s (%d 个文件)...\n", it.name, len(it.files))
+			for _, f := range it.files {
+				res := up.UploadFile(f)
+				if res.OK {
+					okN++
+				} else {
+					failN++
+				}
 			}
 		}
+		fmt.Printf("[✓] CPA 上传完成 ok=%d fail=%d skip_runs=%d\n", okN, failN, skipN)
 	}
-	fmt.Printf("[✓] 完成 ok=%d fail=%d skip_runs=%d\n", okN, failN, skipN)
+
+	if hasSub2APIKey {
+		fmt.Println("\n--- 开始导入至 SUB2API 管理面板 ---")
+		s2a := sub2api.NewUploader(sub2api.Config{
+			Enabled:    true,
+			BaseURL:    cfg.Sub2APIBaseURL,
+			Key:        cfg.Sub2APIKey,
+			Path:       cfg.Sub2APIPath,
+			TimeoutSec: cfg.Sub2APITimeoutSec,
+			Retries:    cfg.Sub2APIRetries,
+		}, func(f string, a ...any) {
+			fmt.Printf(f+"\n", a...)
+		})
+
+		var okN, failN, skipN int
+		for _, idx := range selected {
+			it := items[idx]
+			if len(it.files) == 0 {
+				fmt.Printf("[!] %s 无 CPA json，跳过\n", it.name)
+				skipN++
+				continue
+			}
+			fmt.Printf("[*] SUB2API 导入 %s (%d 个文件)...\n", it.name, len(it.files))
+			for _, f := range it.files {
+				res := s2a.ImportFile(f)
+				if res.OK {
+					okN++
+				} else {
+					failN++
+				}
+			}
+		}
+		fmt.Printf("[✓] SUB2API 导入完成 ok=%d fail=%d skip_runs=%d\n", okN, failN, skipN)
+	}
+
 	return nil
 }

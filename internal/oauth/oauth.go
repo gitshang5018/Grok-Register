@@ -365,7 +365,10 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 
 	// Warm: open verification page so auth.x.ai sees cookie session (optional).
 	if flow.VerificationURL != "" {
-		_, _, _ = c.getWithCookie(ctx, flow.VerificationURL, cookie)
+		_, _, warmCookie, _ := c.getWithCookie(ctx, flow.VerificationURL, cookie)
+		if warmCookie != "" {
+			cookie = warmCookie
+		}
 	}
 
 	// verify
@@ -499,7 +502,10 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			if isSignInRedirect(next) {
 				return fmt.Errorf("sso_rejected approve-redirect→sign-in")
 			}
-			if st, b, err := c.getWithCookie(ctx, next, cookie); err == nil {
+			if st, b, newCookie, err := c.getWithCookie(ctx, next, cookie); err == nil {
+				if newCookie != "" {
+					cookie = newCookie
+				}
 				if authorizedBody(b) || isDeviceDone(next) {
 					c.ClearRateLimit()
 					return nil
@@ -562,10 +568,10 @@ func mergeSetCookies(cookie string, h http.Header) string {
 	return out
 }
 
-func (c *Client) getWithCookie(ctx context.Context, rawURL, cookie string) (int, string, error) {
+func (c *Client) getWithCookie(ctx context.Context, rawURL, cookie string) (int, string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return 0, "", err
+		return 0, "", cookie, err
 	}
 	req.Header.Set("User-Agent", c.ua)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -575,21 +581,22 @@ func (c *Client) getWithCookie(ctx context.Context, rawURL, cookie string) (int,
 	req.Header.Set("Sec-Fetch-Dest", "document")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, "", err
+		return 0, "", cookie, err
 	}
+	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	_ = resp.Body.Close()
-	return resp.StatusCode, string(body), nil
+	updatedCookie := mergeSetCookies(cookie, resp.Header)
+	return resp.StatusCode, string(body), updatedCookie, nil
 }
 
 // loadConsentForm GETs consent page and extracts form fields (principal_id, csrf, etc.).
 func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string) (url.Values, string) {
-	st, html, err := c.getWithCookie(ctx, consentURL, cookie)
+	st, html, newCookie, err := c.getWithCookie(ctx, consentURL, cookie)
 	if err != nil || st >= 400 {
 		return nil, cookie
 	}
 	fields := parseHTMLFormFields(html)
-	return fields, cookie
+	return fields, newCookie
 }
 
 func parseHTMLFormFields(html string) url.Values {
@@ -670,13 +677,17 @@ func (c *Client) setFormHeaders(req *http.Request, referer, cookie string) {
 	req.Header.Set("User-Agent", c.ua)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Origin", "https://accounts.x.ai")
+	origin := "https://" + req.URL.Host
+	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", referer)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// OAuth device verify/approve: ONLY session SSO. Do NOT append FlareSolverr/CF
 	// clearance cookies — they can poison auth.x.ai and yield invalid_grant Access denied.
 	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Sec-Fetch-Site", "same-site")
+	if strings.Contains(referer, req.URL.Host) {
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
 	req.Header.Set("Sec-Fetch-Dest", "document")
 	req.Header.Set("Sec-Fetch-User", "?1")
@@ -829,59 +840,6 @@ func trimLoc(s string) string {
 	return s[:120] + "…"
 }
 
-// Refresh exchanges a refresh_token for a new access/refresh pair (no device confirm).
-func (c *Client) Refresh(ctx context.Context, refreshToken string) (Credential, error) {
-	refreshToken = strings.TrimSpace(refreshToken)
-	if refreshToken == "" {
-		return Credential{}, fmt.Errorf("refresh_token empty")
-	}
-	if err := c.WaitRateLimit(ctx); err != nil {
-		return Credential{}, err
-	}
-	_, tokenEP, err := c.discover(ctx)
-	if err != nil {
-		return Credential{}, err
-	}
-	form := url.Values{}
-	form.Set("client_id", ClientID)
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", refreshToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEP, strings.NewReader(form.Encode()))
-	if err != nil {
-		return Credential{}, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", c.ua)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return Credential{}, err
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	_ = resp.Body.Close()
-	var doc map[string]any
-	_ = json.Unmarshal(body, &doc)
-	if resp.StatusCode/100 == 2 {
-		cred, err := credentialFrom(doc, tokenEP)
-		if err != nil {
-			return Credential{}, err
-		}
-		// Some IdPs omit rotating refresh_token; keep old.
-		if cred.RefreshToken == "" {
-			cred.RefreshToken = refreshToken
-		}
-		return cred, nil
-	}
-	errCode, _ := doc["error"].(string)
-	errDesc, _ := doc["error_description"].(string)
-	if errCode == "" {
-		return Credential{}, fmt.Errorf("refresh_rejected status=%d body=%s", resp.StatusCode, truncateBody(body, 120))
-	}
-	if errDesc != "" {
-		return Credential{}, fmt.Errorf("refresh_rejected: %s (%s)", errCode, errDesc)
-	}
-	return Credential{}, fmt.Errorf("refresh_rejected: %s", errCode)
-}
-
 // Exchange is convenience: start flow + confirm HTTP + poll.
 // On rate_limited / device 429 / invalid_grant, retry with a fresh device code.
 func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
@@ -914,8 +872,13 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 		cred, err := c.PollToken(ctx, flow)
 		if err != nil {
 			last = err
-			// invalid_grant: consent did not stick — new device flow
+			// invalid_grant: consent did not stick — new device flow after brief settle
 			if attempt < 2 && strings.Contains(err.Error(), "invalid_grant") {
+				select {
+				case <-ctx.Done():
+					return Credential{}, ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
 				continue
 			}
 			return Credential{}, err
