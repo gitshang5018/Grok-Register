@@ -1,6 +1,7 @@
 package email
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,17 +93,7 @@ func (p *Provider) Create() (Handle, error) {
 	password := randStr(15)
 	switch p.cfg.Mode {
 	case config.EmailCustom:
-		domain := p.cfg.Domain
-		if domain == "" {
-			if doms, err := p.fetchCFDomains(); err == nil && len(doms) > 0 {
-				domain = doms[rand.Intn(len(doms))]
-			}
-		}
-		if domain == "" {
-			return Handle{}, fmt.Errorf("custom 邮箱模式: 未配置 EMAIL_DOMAIN 且未能从 %s/open_api/settings 自动获取到 defaultDomains", p.cfg.API)
-		}
-		email := fmt.Sprintf("oc%s@%s", randStr(10), domain)
-		return Handle{Kind: "custom", Email: email, Password: password}, nil
+		return p.cfTempCreate(password)
 	case config.EmailTestmail:
 		h, err := p.testmailCreate()
 		if err != nil {
@@ -319,8 +310,14 @@ func (p *Provider) fetch(h Handle) (string, error) {
 				lastDiag = fmt.Sprintf("req err: %v", err)
 				continue
 			}
+			token := h.Token
+			if token == "" {
+				token = p.cfg.Password
+			}
+			if token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
 			if p.cfg.Password != "" {
-				req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
 				req.Header.Set("X-Api-Key", p.cfg.Password)
 				req.Header.Set("x-custom-auth", p.cfg.Password)
 				req.Header.Set("x-admin-passcode", p.cfg.Password)
@@ -550,4 +547,60 @@ func (p *Provider) fetchCFDomains() ([]string, error) {
 		return doms, nil
 	}
 	return nil, fmt.Errorf("no domains found in /open_api/settings")
+}
+
+func (p *Provider) cfTempCreate(password string) (Handle, error) {
+	domain := p.cfg.Domain
+	if domain == "" {
+		if doms, err := p.fetchCFDomains(); err == nil && len(doms) > 0 {
+			domain = doms[rand.Intn(len(doms))]
+		}
+	}
+
+	apiBase := strings.TrimRight(p.cfg.API, "/")
+	name := "oc" + randStr(10)
+	payload := map[string]any{
+		"name":         name,
+		"enablePrefix": true,
+	}
+	if domain != "" {
+		payload["domain"] = domain
+	}
+
+	raw, _ := json.Marshal(payload)
+	for _, path := range []string{"/api/new_address", "/admin/new_address"} {
+		req, err := http.NewRequest(http.MethodPost, apiBase+path, bytes.NewReader(raw))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if p.cfg.Password != "" {
+			req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
+			req.Header.Set("X-Api-Key", p.cfg.Password)
+			req.Header.Set("x-custom-auth", p.cfg.Password)
+			req.Header.Set("x-admin-passcode", p.cfg.Password)
+		}
+		resp, err := p.cfg.HTTPClient.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode/100 == 2 {
+			var doc map[string]any
+			if err := json.Unmarshal(body, &doc); err == nil {
+				addr, _ := doc["address"].(string)
+				jwtToken, _ := doc["jwt"].(string)
+				if addr != "" && jwtToken != "" {
+					return Handle{Kind: "custom", Email: addr, Password: password, Token: jwtToken}, nil
+				}
+			}
+		}
+	}
+
+	if domain == "" {
+		return Handle{}, fmt.Errorf("custom 邮箱模式: 未配置 EMAIL_DOMAIN 且从 %s 创建新地址失败", p.cfg.API)
+	}
+	email := fmt.Sprintf("%s@%s", name, domain)
+	return Handle{Kind: "custom", Email: email, Password: password}, nil
 }
