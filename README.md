@@ -456,7 +456,8 @@ sudo apt-get install -y xvfb
 | `grok logs` / `logs -f` | 最近日志 / 跟踪 |
 | `grok stop` | 停止注册机；`CLEARANCE_AUTO_STOP=1` 时同步停清障容器 |
 | `grok config` | 打开 `config.env`，刷新 `config.env.example` |
-| `grok upload` | 选最近 run，上传 CPA JSON |
+| `grok upload` | 选最近 run，交互上传 CPA JSON 到 Management API / SUB2API |
+| `grok reoauth <path>` | 批量解析 inspection JSON/CPA JSON/accounts.txt 重新登录并自动重新导入 SUB2API |
 
 ---
 

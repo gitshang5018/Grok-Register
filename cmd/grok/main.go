@@ -18,6 +18,7 @@ import (
 	"github.com/grok-free-register/grok-reg/internal/home"
 	"github.com/grok-free-register/grok-reg/internal/logx"
 	"github.com/grok-free-register/grok-reg/internal/pipeline"
+	"github.com/grok-free-register/grok-reg/internal/reoauth"
 	"github.com/grok-free-register/grok-reg/internal/state"
 	"github.com/grok-free-register/grok-reg/internal/sub2api"
 )
@@ -75,6 +76,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
+	case "reoauth":
+		if err := cmdReoauth(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		printHelp()
 	case "version", "-v", "--version":
@@ -97,7 +103,8 @@ func printHelp() {
   grok stop                       立即停止注册机
   grok logs [-f] [--debug|--info|--warn|--error]
                                   查看最近一次运行日志；-f 实时跟踪
-  grok upload                     选择最近 run 的 CPA JSON 上传到 Management API
+  grok upload                     选择最近 run 的 CPA JSON 上传到 Management API / SUB2API
+  grok reoauth <path> [选项]       解析账号文件/巡检 JSON，批量重新 OAuth 授权并重新自动入库
   grok config                     打开 ~/.grok/config.env（并刷新 config.env.example）
   grok help                       显示帮助
 
@@ -858,4 +865,138 @@ func cmdUpload() error {
 	}
 
 	return nil
+}
+
+func cmdReoauth(args []string) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		fmt.Print(`grok reoauth <path> [选项]
+
+解析 inspection JSON、CPA JSON、accounts.txt 或包含以上文件的目录，对过期/需重登账号重新执行 OAuth 并导出新 CPA / SUB2API。
+
+用法:
+  grok reoauth <path> [选项]
+
+<path> 支持类型:
+  - inspection JSON: 含 results[].email (如额度耗耗尽导出；支持 UTF-8 BOM)
+  - CPA JSON:        单个 xai-*.json (含 refresh_token)
+  - accounts.txt:    email:pass:sso
+  - 目录:            扫描目录内所有符合格式的文件
+
+选项:
+  -w, --workers N        并发线程数 (默认 2)
+  --out <dir>            指定 CPA 结果输出目录 (默认当前最新 run 的 CPA 目录)
+  --no-probe             跳过探活
+  --proxy <url>          使用的 HTTP/SOCKS5 代理 URL
+`)
+		return nil
+	}
+
+	targetPath := args[0]
+	workers := 2
+	outDir := ""
+	probe := true
+	proxyURL := ""
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "-w", "--workers":
+			if i+1 < len(args) {
+				if v, err := strconv.Atoi(args[i+1]); err == nil && v > 0 {
+					workers = v
+					i++
+				}
+			}
+		case "--out":
+			if i+1 < len(args) {
+				outDir = args[i+1]
+				i++
+			}
+		case "--no-probe":
+			probe = false
+		case "--proxy":
+			if i+1 < len(args) {
+				proxyURL = args[i+1]
+				i++
+			}
+		}
+	}
+
+	p, err := home.Resolve()
+	if err != nil {
+		return err
+	}
+	_ = p.EnsureBase()
+	cfg, err := config.Load(p.Config)
+	if err != nil {
+		return err
+	}
+	if proxyURL == "" {
+		proxyURL = cfg.RegisterProxy
+	}
+
+	if outDir == "" {
+		rd, err := p.PrepareRun("")
+		if err != nil {
+			return err
+		}
+		outDir = rd.CPA
+	}
+
+	accs, err := reoauth.ParsePath(targetPath)
+	if err != nil {
+		return fmt.Errorf("解析路径失败: %w", err)
+	}
+	if len(accs) == 0 {
+		return fmt.Errorf("未从 %s 解析到可重登的账号数据", targetPath)
+	}
+
+	fmt.Printf("[*] 解析到 %d 个账号，准备重新 OAuth (并发线程=%d)...\n", len(accs), workers)
+
+	var cpaUploader *cpa.Uploader
+	if cfg.CPAUploadEnabled && cfg.CPAManagementKey != "" {
+		cpaUploader = cpa.NewUploader(cpa.UploadConfig{
+			Enabled:      true,
+			BaseURL:      cfg.CPAManagementBase,
+			Key:          cfg.CPAManagementKey,
+			TimeoutSec:   cfg.CPAUploadTimeoutSec,
+			Retries:      cfg.CPAUploadRetries,
+			NameTemplate: cfg.CPAUploadNameTemplate,
+			Mode:         cfg.CPAUploadMode,
+		}, func(f string, a ...any) {
+			fmt.Printf(f+"\n", a...)
+		})
+	}
+
+	var sub2apiUploader *sub2api.Uploader
+	if cfg.Sub2APIEnabled && cfg.Sub2APIKey != "" {
+		sub2apiUploader = sub2api.NewUploader(sub2api.Config{
+			Enabled:    true,
+			BaseURL:    cfg.Sub2APIBaseURL,
+			Key:        cfg.Sub2APIKey,
+			Path:       cfg.Sub2APIPath,
+			TimeoutSec: cfg.Sub2APITimeoutSec,
+			Retries:    cfg.Sub2APIRetries,
+		}, func(f string, a ...any) {
+			fmt.Printf(f+"\n", a...)
+		})
+	}
+
+	ctx := context.Background()
+	opts := reoauth.Options{
+		Proxy:       proxyURL,
+		OutCPA:      outDir,
+		Workers:     workers,
+		MinInterval: time.Duration(cfg.OAuthMinIntervalSec * float64(time.Second)),
+		Probe:       probe,
+		ProbeWarmup: cfg.ProbeWarmupSec,
+		LookupRoots: []string{p.Outputs},
+		OutLog: func(format string, args ...any) {
+			fmt.Printf(format+"\n", args...)
+		},
+		Uploader:        cpaUploader,
+		Sub2APIUploader: sub2apiUploader,
+	}
+
+	_, err = reoauth.Run(ctx, accs, opts)
+	return err
 }

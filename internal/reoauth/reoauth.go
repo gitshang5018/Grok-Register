@@ -15,6 +15,7 @@ import (
 
 	"github.com/grok-free-register/grok-reg/internal/cpa"
 	"github.com/grok-free-register/grok-reg/internal/oauth"
+	"github.com/grok-free-register/grok-reg/internal/sub2api"
 )
 
 // Account is one re-login candidate.
@@ -43,17 +44,17 @@ type Result struct {
 
 // Options for Run.
 type Options struct {
-	Proxy       string
-	OutCPA      string
-	OutLog      func(format string, args ...any)
-	Workers     int
-	MinInterval time.Duration
-	Probe       bool
-	ProbeWarmup float64
-	LookupRoots []string // optional ~/.grok/outputs etc. to resolve email→token
-	Secret      []byte
-	// Uploader: when non-nil and Enabled(), successful CPA files are pushed to Management API.
-	Uploader *cpa.Uploader
+	Proxy           string
+	OutCPA          string
+	OutLog          func(format string, args ...any)
+	Workers         int
+	MinInterval     time.Duration
+	Probe           bool
+	ProbeWarmup     float64
+	LookupRoots     []string // optional ~/.grok/outputs etc. to resolve email→token
+	Secret          []byte
+	Uploader        *cpa.Uploader
+	Sub2APIUploader *sub2api.Uploader
 }
 
 func logf(opt Options, f string, a ...any) {
@@ -634,6 +635,9 @@ func reauthOne(ctx context.Context, cli *oauth.Client, a Account, opt Options) R
 				res.Upload = fmt.Sprintf("http=%d %s", ur.Status, truncate(ur.Body, 80))
 			}
 		}
+	}
+	if opt.Sub2APIUploader != nil && opt.Sub2APIUploader.Enabled() {
+		_ = opt.Sub2APIUploader.ImportDocument(doc)
 	}
 	return res
 }
