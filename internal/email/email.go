@@ -87,7 +87,16 @@ func (p *Provider) Create() (Handle, error) {
 	password := randStr(15)
 	switch p.cfg.Mode {
 	case config.EmailCustom:
-		email := fmt.Sprintf("oc%s@%s", randStr(10), p.cfg.Domain)
+		domain := p.cfg.Domain
+		if domain == "" {
+			if doms, err := p.fetchCFDomains(); err == nil && len(doms) > 0 {
+				domain = doms[rand.Intn(len(doms))]
+			}
+		}
+		if domain == "" {
+			return Handle{}, fmt.Errorf("custom 邮箱模式: 未配置 EMAIL_DOMAIN 且未能从 %s/open_api/settings 自动获取到 defaultDomains", p.cfg.API)
+		}
+		email := fmt.Sprintf("oc%s@%s", randStr(10), domain)
 		return Handle{Kind: "custom", Email: email, Password: password}, nil
 	case config.EmailTestmail:
 		h, err := p.testmailCreate()
@@ -467,4 +476,52 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+func (p *Provider) fetchCFDomains() ([]string, error) {
+	if p.cfg.API == "" {
+		return nil, fmt.Errorf("EMAIL_API is empty")
+	}
+	apiBase := strings.TrimRight(p.cfg.API, "/")
+	u := apiBase + "/open_api/settings"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if p.cfg.Password != "" {
+		req.Header.Set("Authorization", "Bearer "+p.cfg.Password)
+		req.Header.Set("X-Api-Key", p.cfg.Password)
+		req.Header.Set("x-custom-auth", p.cfg.Password)
+		req.Header.Set("x-admin-passcode", p.cfg.Password)
+	}
+	resp, err := p.cfg.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+
+	var doms []string
+	if list, ok := doc["defaultDomains"].([]any); ok {
+		for _, item := range list {
+			if s, ok := item.(string); ok && s != "" {
+				s = strings.TrimSpace(s)
+				s = strings.TrimPrefix(s, "@")
+				if s != "" {
+					doms = append(doms, s)
+				}
+			}
+		}
+	}
+	if len(doms) > 0 {
+		return doms, nil
+	}
+	return nil, fmt.Errorf("no domains found in /open_api/settings")
 }
