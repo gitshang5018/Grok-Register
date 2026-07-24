@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,8 +108,10 @@ func WriteAtomic(dir string, doc Document, secret []byte) (string, error) {
 // Probe hits cli-chat-proxy with minimal responses call (acpa_watchdog shape).
 // New tokens often get transient 403 permission-denied; 5xx/timeout also retry.
 // warmupSec: sleep before first attempt (0 uses 1.5s default; negative = no sleep).
+// Probe hits cli-chat-proxy with minimal responses call (acpa_watchdog shape).
+// New tokens often get transient 403 permission-denied; 5xx/timeout also retry.
+// warmupSec: sleep before first attempt (0 uses 1.5s default; negative = no sleep).
 func Probe(doc Document, proxy string, warmupSec ...float64) error {
-	_ = proxy
 	warm := 5.0
 	if len(warmupSec) > 0 {
 		warm = warmupSec[0]
@@ -124,7 +127,7 @@ func Probe(doc Document, proxy string, warmupSec ...float64) error {
 		if backs[attempt] > 0 {
 			time.Sleep(backs[attempt])
 		}
-		err := probeOnce(doc)
+		err := probeOnce(doc, proxy)
 		if err == nil {
 			return nil
 		}
@@ -145,6 +148,7 @@ func probeRetryable(err error) bool {
 	if strings.Contains(msg, "permission-denied") ||
 		strings.Contains(msg, "chat endpoint is denied") ||
 		strings.Contains(msg, "http=403") ||
+		strings.Contains(msg, "http=401") ||
 		strings.Contains(msg, "http=429") ||
 		strings.Contains(msg, "http=500") ||
 		strings.Contains(msg, "http=502") ||
@@ -152,14 +156,24 @@ func probeRetryable(err error) bool {
 		strings.Contains(msg, "http=504") ||
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "EOF") {
 		return true
 	}
 	return false
 }
 
-func probeOnce(doc Document) error {
-	client := &http.Client{Timeout: 45 * time.Second}
+func probeOnce(doc Document, proxy string) error {
+	tr := &http.Transport{}
+	if proxy != "" {
+		if u, err := url.Parse(proxy); err == nil {
+			tr.Proxy = http.ProxyURL(u)
+		}
+	}
+	client := &http.Client{
+		Timeout:   45 * time.Second,
+		Transport: tr,
+	}
 	// Match keys/acpa_watchdog.py body exactly — bare content string can 403.
 	payload := map[string]any{
 		"model":             "grok-4.5",

@@ -907,12 +907,9 @@ func (e *Engine) oauthWorker(ctx context.Context, id int) {
 		if e.opt.Cfg.ProbeEnabled {
 			warmup := e.opt.Cfg.ProbeWarmupSec
 			if err := cpa.Probe(doc, e.opt.Cfg.RegisterProxy, warmup); err != nil {
-				log.Warnf("探活失败 %s: %v", job.Email, err)
-				path, _ := cpa.WriteAtomic(e.opt.Run.Discarded, doc, cpa.DefaultSecret())
-				_ = path
-				e.fail.Add(1)
-				e.releaseReserve()
-				continue
+				log.Warnf("探活提示 %s: %v（凭证有效，仍将生成 CPA 并导出）", job.Email, err)
+			} else {
+				log.Infof("探活通过 %s", job.Email)
 			}
 		}
 		// Atomic complete: prevents multi-OAuth overshoot of -t.

@@ -890,3 +890,36 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 	}
 	return Credential{}, last
 }
+
+// Refresh re-issues access token using existing refresh_token.
+func (c *Client) Refresh(ctx context.Context, refreshToken string) (Credential, error) {
+	_, tokEP, err := c.discover(ctx)
+	if err != nil || tokEP == "" {
+		tokEP = "https://auth.x.ai/oauth2/token"
+	}
+	form := url.Values{}
+	form.Set("client_id", ClientID)
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokEP, strings.NewReader(form.Encode()))
+	if err != nil {
+		return Credential{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", c.ua)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return Credential{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode/100 != 2 {
+		return Credential{}, fmt.Errorf("oauth_refresh_failed status=%d body=%s", resp.StatusCode, truncateBody(body, 120))
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return Credential{}, err
+	}
+	return credentialFrom(doc, tokEP)
+}
