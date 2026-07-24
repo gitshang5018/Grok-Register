@@ -439,7 +439,7 @@ func applyMap(cfg *Config, env map[string]string) {
 		cfg.CFImpersonateFallback = strings.TrimSpace(v)
 	}
 	if v, ok := env["REGISTER_PROXY"]; ok {
-		cfg.RegisterProxy = v
+		cfg.RegisterProxy = NormalizeProxy(v)
 	}
 	if v, ok := env["FLARESOLVERR_URL"]; ok {
 		cfg.FlareSolverrURL = v
@@ -577,6 +577,18 @@ func bool01(b bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+// NormalizeProxy ensures proxy URL has scheme (http, https, socks5, socks5h).
+func NormalizeProxy(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if !strings.Contains(p, "://") {
+		return "http://" + p
+	}
+	return p
 }
 
 // ApplyProxyEnv sets process proxy env for outbound HTTP (tempmail etc).
