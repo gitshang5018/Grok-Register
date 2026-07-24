@@ -2,11 +2,11 @@
 # Grok-Register 一键部署
 #
 # Linux (Debian/Ubuntu，需 root/sudo):
-#   curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | sudo bash
 #   # 有 TTY 时会询问：命令名 / 安装目录 / 数据目录（回车=默认）
 #
 # macOS（需已装 Homebrew + Docker Desktop，普通用户即可）:
-#   curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | bash
 #
 # 非交互（CI / 无 TTY）:
 #   curl -fsSL ... | sudo NONINTERACTIVE=1 bash
@@ -43,7 +43,7 @@ esac
 # 默认值
 # ---------------------------------------------------------------------------
 COMMAND_NAME="${COMMAND_NAME:-grok}"
-REPO_URL="${REPO_URL:-https://github.com/Charles-0509/Grok-Register.git}"
+REPO_URL="${REPO_URL:-https://github.com/gitshang5018/Grok-Register.git}"
 BRANCH="${BRANCH:-main}"
 GO_VERSION="${GO_VERSION:-1.24.4}"
 SKIP_DOCKER="${SKIP_DOCKER:-0}"
@@ -1124,7 +1124,7 @@ EOM
   # 或 https://www.docker.com/products/docker-desktop/
   open -a Docker
   docker info
-  curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | bash
 EOM
       exit 1
     fi

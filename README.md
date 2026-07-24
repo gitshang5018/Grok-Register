@@ -91,7 +91,7 @@ curl -fsSL .../install.sh | sudo NONINTERACTIVE=1 bash
 ### Linux 一行
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | sudo bash
 ```
 
 | 项 | 默认 |
@@ -117,7 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scr
 然后（**不要 sudo**）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | bash
 ```
 
 | 项 | 默认 |
@@ -284,7 +284,7 @@ docker compose version || sudo apt install -y docker-compose-plugin
 ```bash
 sudo mkdir -p /opt
 cd /opt
-sudo git clone https://github.com/Charles-0509/Grok-Register.git
+sudo git clone https://github.com/gitshang5018/Grok-Register.git
 cd /opt/Grok-Register
 
 export PATH=$PATH:/usr/local/go/bin
@@ -428,7 +428,7 @@ grok upload
 
 ```bash
 # 推荐：重跑一键（保留 config.env，自动补齐新键）
-curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | sudo bash
 
 # 或手动
 cd /opt/Grok-Register   # mac: ~/Grok-Register
@@ -633,7 +633,7 @@ sudo apt-get update -y
 sudo apt-get install -y xvfb
 
 # 2) 更新源码 + 重装 CLI（推荐重跑一键，会保留 config 并补齐新键）
-curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | sudo bash
 
 # 或手动:
 #   cd /opt/Grok-Register && sudo git pull
@@ -664,7 +664,7 @@ command -v xvfb-run && xvfb-run -a echo xvfb_ok
 brew install go python 2>/dev/null || true
 
 # 2) 一键或手动
-curl -fsSL https://raw.githubusercontent.com/Charles-0509/Grok-Register/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gitshang5018/Grok-Register/main/scripts/install.sh | bash
 # 或: cd ~/Grok-Register && git pull && make build && make install PREFIX=$HOME/.local
 
 # 3) 补 config（同 Linux，CFG=~/.grok/config.env）
