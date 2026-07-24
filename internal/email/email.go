@@ -24,9 +24,14 @@ var bannedDomains = map[string]struct{}{
 }
 
 var codeRe = []*regexp.Regexp{
+	// 1. Highest priority: code or verification keyword context (e.g. "code is 123456", "code: 123-456")
+	regexp.MustCompile(`(?i)(?:code|verification|verify|grok)[^\d]{0,30}\b([A-Z0-9]{3}-?[A-Z0-9]{3})\b`),
+	// 2. HTML tag enclosed code
 	regexp.MustCompile(`>([A-Z0-9]{3}-[A-Z0-9]{3})<`),
-	regexp.MustCompile(`>([A-Z0-9]{6})<`),
-	regexp.MustCompile(`\b([A-Z0-9]{3}-?[A-Z0-9]{3})\b`),
+	regexp.MustCompile(`>([0-9]{6})<`),
+	// 3. Exact 6-digit or 3-3 format
+	regexp.MustCompile(`\b([0-9]{3}-[0-9]{3})\b`),
+	regexp.MustCompile(`\b([0-9]{6})\b`),
 }
 
 type Handle struct {
@@ -282,17 +287,27 @@ func (p *Provider) fetch(h Handle) (string, error) {
 	case "custom":
 		apiBase := strings.TrimRight(p.cfg.API, "/")
 		urlsToTry := []string{
-			apiBase + "/check/" + url.PathEscape(h.Email),
+			apiBase + "/admin/mails?mail=" + url.QueryEscape(h.Email),
 			apiBase + "/api/mails?mail=" + url.QueryEscape(h.Email),
+			apiBase + "/api/mail?address=" + url.QueryEscape(h.Email),
+			apiBase + "/check/" + url.PathEscape(h.Email),
 			apiBase + "/api/messages?to=" + url.QueryEscape(h.Email),
 		}
-		if strings.Contains(apiBase, "/api/mails") || strings.Contains(apiBase, "/api/messages") {
+		if strings.Contains(apiBase, "/admin/mails") || strings.Contains(apiBase, "/api/mails") || strings.Contains(apiBase, "/api/messages") {
 			urlsToTry = []string{apiBase}
 		}
 
 		var lastText string
 		for _, u := range urlsToTry {
-			req, err := http.NewRequest(http.MethodGet, u, nil)
+			uReq := u
+			if p.cfg.Password != "" {
+				sep := "?"
+				if strings.Contains(uReq, "?") {
+					sep = "&"
+				}
+				uReq += sep + "passcode=" + url.QueryEscape(p.cfg.Password) + "&auth=" + url.QueryEscape(p.cfg.Password)
+			}
+			req, err := http.NewRequest(http.MethodGet, uReq, nil)
 			if err != nil {
 				continue
 			}
