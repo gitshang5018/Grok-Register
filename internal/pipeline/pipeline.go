@@ -312,11 +312,11 @@ func (e *Engine) run(ctx context.Context) error {
 	})
 	if cfg.EmailMode == config.EmailTestmail {
 		log.Infof("Email mode=testmail namespace=%s domain=%s", cfg.TestmailNamespace, cfg.TestmailDomain)
-	} else if cfg.EmailMode == config.EmailCustom {
+	} else if cfg.EmailMode == config.EmailCustom || cfg.EmailMode == config.EmailCFTemp {
 		if cfg.EmailDomain != "" {
-			log.Infof("Email mode=custom domain=%s api=%s", cfg.EmailDomain, cfg.EmailAPI)
+			log.Infof("Email mode=%s domain=%s api=%s", cfg.EmailMode, cfg.EmailDomain, cfg.EmailAPI)
 		} else {
-			log.Infof("Email mode=custom (自建邮箱: 将自动从 %s/open_api/settings 动态抓取 defaultDomains)", cfg.EmailAPI)
+			log.Infof("Email mode=%s (cloudflare_temp_email: 将自动从 %s/open_api/settings 动态抓取 defaultDomains)", cfg.EmailMode, cfg.EmailAPI)
 		}
 	} else {
 		log.Infof("Email mode=%s", cfg.EmailMode)

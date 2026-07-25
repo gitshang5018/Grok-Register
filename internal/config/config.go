@@ -19,6 +19,7 @@ const (
 	EmailTempmail EmailMode = "tempmail"
 	EmailTestmail EmailMode = "testmail"
 	EmailCustom   EmailMode = "custom"
+	EmailCFTemp   EmailMode = "cf_temp_email"
 )
 
 type Config struct {
@@ -404,15 +405,32 @@ func parseEnvFile(content string) map[string]string {
 
 func applyMap(cfg *Config, env map[string]string) {
 	if v, ok := env["EMAIL_MODE"]; ok {
-		cfg.EmailMode = EmailMode(strings.ToLower(v))
+		m := strings.ToLower(strings.TrimSpace(v))
+		if m == "cf_temp_email" || m == "cftemp" || m == "cf_temp" || m == "cloudflare_temp_email" {
+			cfg.EmailMode = EmailCFTemp
+		} else {
+			cfg.EmailMode = EmailMode(m)
+		}
 	}
-	if v, ok := env["EMAIL_DOMAIN"]; ok {
+	if v, ok := env["CF_TEMP_EMAIL_API"]; ok && v != "" {
+		cfg.EmailAPI = v
+		if cfg.EmailMode == "" {
+			cfg.EmailMode = EmailCFTemp
+		}
+	}
+	if v, ok := env["CF_TEMP_EMAIL_ADMIN"]; ok && v != "" {
+		cfg.EmailPassword = v
+	}
+	if v, ok := env["CF_TEMP_EMAIL_DOMAIN"]; ok && v != "" {
 		cfg.EmailDomain = v
 	}
-	if v, ok := env["EMAIL_API"]; ok {
+	if v, ok := env["EMAIL_DOMAIN"]; ok && cfg.EmailDomain == "" {
+		cfg.EmailDomain = v
+	}
+	if v, ok := env["EMAIL_API"]; ok && cfg.EmailAPI == "" {
 		cfg.EmailAPI = v
 	}
-	if v, ok := env["EMAIL_PASSWORD"]; ok {
+	if v, ok := env["EMAIL_PASSWORD"]; ok && cfg.EmailPassword == "" {
 		cfg.EmailPassword = v
 	}
 	if v, ok := env["EMAIL_KEY"]; ok && cfg.EmailPassword == "" {

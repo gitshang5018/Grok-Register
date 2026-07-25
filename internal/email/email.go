@@ -25,13 +25,14 @@ var bannedDomains = map[string]struct{}{
 }
 
 var codeRe = []*regexp.Regexp{
-	// 1. Highest priority: code or verification keyword context (e.g. "code is 123456", "code: 123-456")
-	regexp.MustCompile(`(?i)(?:code|verification|verify|grok)[^\d]{0,30}\b([A-Z0-9]{3}-?[A-Z0-9]{3})\b`),
+	// 1. Highest priority: code/verification/verify/grok context followed by 6-char code
+	regexp.MustCompile(`(?i)(?:code|verification|verify|grok|confirm|confirmation)[^A-Z0-9]{0,30}\b([A-Z0-9]{3}-?[A-Z0-9]{3})\b`),
 	// 2. HTML tag enclosed code
 	regexp.MustCompile(`>([A-Z0-9]{3}-[A-Z0-9]{3})<`),
-	regexp.MustCompile(`>([0-9]{6})<`),
-	// 3. Exact 6-digit or 3-3 format
-	regexp.MustCompile(`\b([0-9]{3}-[0-9]{3})\b`),
+	regexp.MustCompile(`>([A-Z0-9]{6})<`),
+	// 3. Exact 3-3 format
+	regexp.MustCompile(`\b([A-Z0-9]{3}-[A-Z0-9]{3})\b`),
+	// 4. Exact 6-digit number
 	regexp.MustCompile(`\b([0-9]{6})\b`),
 }
 
@@ -92,7 +93,7 @@ func randStr(n int) string {
 func (p *Provider) Create() (Handle, error) {
 	password := randStr(15)
 	switch p.cfg.Mode {
-	case config.EmailCustom:
+	case config.EmailCustom, config.EmailCFTemp:
 		return p.cfTempCreate(password)
 	case config.EmailTestmail:
 		h, err := p.testmailCreate()
