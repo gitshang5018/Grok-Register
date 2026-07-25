@@ -355,6 +355,66 @@ func (p *Provider) fetch(h Handle) (string, error) {
 			if code := extractCode(raw); code != "" {
 				return code, nil
 			}
+
+			// 2b. If /api/mails returned a list of mail items, fetch individual mail details /api/mail/:id
+			var anyVal any
+			if err := json.Unmarshal(body, &anyVal); err == nil {
+				var items []map[string]any
+				if arr, ok := anyVal.([]any); ok {
+					for _, item := range arr {
+						if m, ok := item.(map[string]any); ok {
+							items = append(items, m)
+						}
+					}
+				} else if doc, ok := anyVal.(map[string]any); ok {
+					for _, k := range []string{"mails", "messages", "results", "data"} {
+						if arr, ok := doc[k].([]any); ok {
+							for _, item := range arr {
+								if m, ok := item.(map[string]any); ok {
+									items = append(items, m)
+								}
+							}
+							break
+						}
+					}
+				}
+				for _, item := range items {
+					var mailID string
+					if idVal, ok := item["id"]; ok {
+						mailID = fmt.Sprintf("%v", idVal)
+					}
+					if mailID == "" {
+						continue
+					}
+					for _, dPath := range []string{"/api/mail/", "/api/mails/"} {
+						dReq, err := http.NewRequest(http.MethodGet, apiBase+dPath+mailID, nil)
+						if err != nil {
+							continue
+						}
+						if token != "" {
+							dReq.Header.Set("Authorization", "Bearer "+token)
+						}
+						if p.cfg.Password != "" {
+							dReq.Header.Set("X-Api-Key", p.cfg.Password)
+							dReq.Header.Set("x-custom-auth", p.cfg.Password)
+							dReq.Header.Set("x-admin-passcode", p.cfg.Password)
+							dReq.Header.Set("x-admin-auth", p.cfg.Password)
+						}
+						dResp, err := p.cfg.HTTPClient.Do(dReq)
+						if err != nil {
+							continue
+						}
+						dBody, _ := io.ReadAll(io.LimitReader(dResp.Body, 2<<20))
+						_ = dResp.Body.Close()
+						if dResp.StatusCode == 200 {
+							if code := extractCode(string(dBody)); code != "" {
+								return code, nil
+							}
+						}
+					}
+				}
+			}
+
 			lastDiag = fmt.Sprintf("HTTP 200 (接口连通正常, 正在等待验证码邮件, 当前收件箱: %s)", truncate(raw, 70))
 		}
 		return lastDiag, nil
