@@ -1,6 +1,9 @@
 package oauth
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestExtractPrincipalID_EscapedJSON(t *testing.T) {
 	// Shape seen in accounts.x.ai consent_debug.html React Query payload.
@@ -34,5 +37,19 @@ func TestPrincipalFromSSO_SessionOnly(t *testing.T) {
 	sso := "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiOTEzYmRhMzAtNzBmYy00NTNjLTkxNjctMmRkOTk0MDJkYmY4In0.2dxHO-3JRewOOot3LJoiCcDpaZ01wD74a_S4wFoM4UU"
 	if pid := principalFromSSO(sso); pid != "" {
 		t.Fatalf("session-only SSO should not yield principal, got %q", pid)
+	}
+}
+
+func TestSanitizeSessionCookies(t *testing.T) {
+	in := "sso=abc.def.ghi; mp_0b4055a12491884bcb6f34a5aa2718b6_mixpanel=x; __cf_bm=y; sso-rw=z"
+	got := sanitizeSessionCookies(in)
+	if !strings.Contains(got, "sso=abc.def.ghi") {
+		t.Fatalf("missing sso: %q", got)
+	}
+	if strings.Contains(got, "__cf_bm") || strings.Contains(got, "mixpanel") {
+		t.Fatalf("analytics/cf leaked: %q", got)
+	}
+	if !strings.Contains(got, "sso-rw=z") {
+		t.Fatalf("missing sso-rw: %q", got)
 	}
 }

@@ -409,9 +409,9 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	if flow.VerificationURL != "" {
 		warmSt, _, warmCookie, warmErr := c.getWithCookie(ctx, flow.VerificationURL, cookie)
 		if warmErr == nil && warmCookie != "" {
-			cookie = warmCookie
+			cookie = sanitizeSessionCookies(warmCookie)
 		}
-		c.logDiag("confirm_warm status=%d err=%v", warmSt, warmErr)
+		c.logDiag("confirm_warm status=%d err=%v cookies=%s", warmSt, warmErr, cookieNames(cookie))
 	}
 
 	// verify
@@ -429,8 +429,8 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	vbody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 	// Merge any Set-Cookie (session) into cookie jar string for subsequent posts.
-	cookie = mergeSetCookies(cookie, resp.Header)
-	c.logDiag("confirm_verify status=%d loc=%q bodyLen=%d", resp.StatusCode, trimLoc(loc), len(vbody))
+	cookie = sanitizeSessionCookies(mergeSetCookies(cookie, resp.Header))
+	c.logDiag("confirm_verify status=%d loc=%q bodyLen=%d cookies=%s", resp.StatusCode, trimLoc(loc), len(vbody), cookieNames(cookie))
 	if err := locationError(loc); err != nil {
 		if errors.Is(err, ErrRateLimited) {
 			c.TripRateLimit()
@@ -486,7 +486,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	// Prefer auth.x.ai approve (matches consent form action). accounts.x.ai may 30x.
 	approveTarget := ApproveURL
 	if fields, htmlCookie, formAction := c.loadConsentForm(ctx, consentRef, cookie); len(fields) > 0 || formAction != "" {
-		cookie = htmlCookie
+		cookie = sanitizeSessionCookies(htmlCookie)
 		if formAction != "" {
 			approveTarget = absURL(consentRef, formAction)
 			c.logDiag("dynamic form action: %q", approveTarget)
@@ -517,7 +517,11 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		approveTarget = ApproveURL
 	}
 
-	c.logDiag("confirm_approve form keys: %d (principal_id=%t pid=%s) cookies=%s", len(aform), aform.Get("principal_id") != "", trimLoc(aform.Get("principal_id")), cookieNames(cookie))
+	cookie = sanitizeSessionCookies(cookie)
+	if !strings.Contains(cookie, "sso=") {
+		return fmt.Errorf("sso_cookie_lost before approve")
+	}
+	c.logDiag("confirm_approve form keys: %d (principal_id=%t pid=%s) cookies=%s body=%s", len(aform), aform.Get("principal_id") != "", trimLoc(aform.Get("principal_id")), cookieNames(cookie), truncateBody([]byte(aform.Encode()), 160))
 
 	fallbackForm := url.Values{
 		"user_code":      {flow.UserCode},
@@ -564,7 +568,16 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			return fmt.Errorf("sso_rejected approve→sign-in")
 		}
 		if (authorizedBody(string(body)) || isDeviceDone(aloc)) && resp2.StatusCode != 307 {
-			// Provisional only — PollToken is the real success signal.
+			// Browser follows 303 See Other with GET — some grants only finalize then.
+			if isDeviceDone(aloc) {
+				doneURL := absURL("https://accounts.x.ai", aloc)
+				if st, b, newCookie, err := c.getWithCookie(ctx, doneURL, cookie); err == nil {
+					cookie = sanitizeSessionCookies(newCookie)
+					c.logDiag("confirm_done GET status=%d authorized=%v cookies=%s", st, authorizedBody(b), cookieNames(cookie))
+				} else {
+					c.logDiag("confirm_done GET err=%v", err)
+				}
+			}
 			c.logDiag("confirm_approve → authorized provisional (attempt=%d has_pid=%t)", attempt, form.Get("principal_id") != "")
 			c.ClearRateLimit()
 			return nil
@@ -611,6 +624,10 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			}
 
 			if isDeviceDone(next) {
+				if st, b, newCookie, err := c.getWithCookie(ctx, next, cookie); err == nil {
+					cookie = sanitizeSessionCookies(newCookie)
+					c.logDiag("confirm_done GET status=%d authorized=%v cookies=%s", st, authorizedBody(b), cookieNames(cookie))
+				}
 				c.logDiag("confirm_approve → done via redirect (provisional)")
 				c.ClearRateLimit()
 				return nil
@@ -678,6 +695,38 @@ func cookieNames(cookie string) string {
 	return strings.Join(names, ",")
 }
 
+// sanitizeSessionCookies keeps only auth session cookies for OAuth.
+// __cf_bm / mixpanel / analytics cookies have been observed to produce
+// cosmetic /device/done redirects with token invalid_grant (Access denied).
+func sanitizeSessionCookies(cookie string) string {
+	if strings.TrimSpace(cookie) == "" {
+		return ""
+	}
+	var keep []string
+	for _, part := range strings.Split(cookie, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" || !strings.Contains(part, "=") {
+			continue
+		}
+		name := strings.ToLower(strings.SplitN(part, "=", 2)[0])
+		switch {
+		case name == "sso":
+			keep = append(keep, part)
+		case name == "sso-rw" || name == "sso_rw":
+			keep = append(keep, part)
+		case strings.HasPrefix(name, "session") || strings.HasPrefix(name, "__session"):
+			keep = append(keep, part)
+		case name == "cf_clearance":
+			// never
+		case strings.HasPrefix(name, "__cf"), strings.HasPrefix(name, "mp_"), strings.HasPrefix(name, "_ga"), strings.HasPrefix(name, "_gid"), strings.HasPrefix(name, "ajs_"):
+			// analytics / CF bot management — drop
+		default:
+			// drop unknown by default on OAuth path
+		}
+	}
+	return strings.Join(keep, "; ")
+}
+
 func mergeSetCookies(cookie string, h http.Header) string {
 	// Keep existing; append new name=value from Set-Cookie (simple).
 	out := cookie
@@ -714,7 +763,7 @@ func (c *Client) getWithCookie(ctx context.Context, rawURL, cookie string) (int,
 	}
 	req.Header.Set("User-Agent", c.ua)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Cookie", cookie) // SSO only — no clearance jar on OAuth pages
+	req.Header.Set("Cookie", sanitizeSessionCookies(cookie)) // SSO only — no CF/analytics
 	req.Header.Set("Sec-Fetch-Site", "same-site")
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
 	req.Header.Set("Sec-Fetch-Dest", "document")
@@ -894,7 +943,7 @@ func (c *Client) setFormHeaders(req *http.Request, referer, cookie string) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// OAuth device verify/approve: ONLY session SSO. Do NOT append FlareSolverr/CF
 	// clearance cookies — they can poison auth.x.ai and yield invalid_grant Access denied.
-	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Cookie", sanitizeSessionCookies(cookie))
 	req.Header.Set("Sec-Fetch-Site", "same-site")
 	if strings.Contains(referer, req.URL.Host) {
 		req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -918,7 +967,7 @@ func (c *Client) PollToken(ctx context.Context, flow DeviceFlow) (Credential, er
 	select {
 	case <-ctx.Done():
 		return Credential{}, ctx.Err()
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(2500 * time.Millisecond):
 	}
 	for time.Now().Before(deadline) {
 		form := url.Values{}
@@ -956,6 +1005,7 @@ func (c *Client) PollToken(ctx context.Context, flow DeviceFlow) (Credential, er
 			return Credential{}, fmt.Errorf("oauth_expired")
 		case "invalid_grant":
 			// Device not actually authorized (confirm incomplete / denied / SSO mismatch).
+			c.logDiag("poll invalid_grant desc=%q body=%s", errDesc, truncateBody(body, 160))
 			if errDesc != "" {
 				return Credential{}, fmt.Errorf("oauth_rejected: invalid_grant (%s) — device not authorized on auth.x.ai", errDesc)
 			}
