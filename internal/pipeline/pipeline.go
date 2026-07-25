@@ -719,7 +719,7 @@ func (e *Engine) pWorker(ctx context.Context, id int) {
 		if err != nil {
 			e.qPending.Release()
 			e.releaseReserve()
-			log.Debugf("[P%d] create email: %v", id, err)
+			log.Warnf("[P%d] 创建临时邮箱失败: %v", id, err)
 			select {
 			case <-ctx.Done():
 				return
@@ -727,10 +727,11 @@ func (e *Engine) pWorker(ctx context.Context, id int) {
 			}
 			continue
 		}
+		log.Infof("[P%d] 正在向 x.ai 发送验证码邮件 (%s)...", id, h.Email)
 		if err := e.xai.CreateEmailCode(h.Email); err != nil {
 			e.qPending.Release()
 			e.releaseReserve()
-			log.Debugf("[P%d] create code %s: %v", id, h.Email, err)
+			log.Warnf("[P%d] 发送验证码失败 (%s): %v", id, h.Email, err)
 			select {
 			case <-ctx.Done():
 				return
@@ -738,13 +739,15 @@ func (e *Engine) pWorker(ctx context.Context, id int) {
 			}
 			continue
 		}
+		log.Infof("[P%d] 已向 x.ai 申请发码，开始等待邮件 (%s)...", id, h.Email)
 		code, err := e.mail.PollCode(h, 90*time.Second)
 		if err != nil {
 			e.qPending.Release()
 			e.releaseReserve()
-			log.Debugf("[P%d] poll code: %v", id, err)
+			log.Warnf("[P%d] 轮询邮件失败 (%s): %v", id, h.Email, err)
 			continue
 		}
+		log.OKf("[P%d] 收到验证码 %s (%s)", id, code, h.Email)
 		item := QItem{Email: h.Email, Password: h.Password, Code: code, Handle: h}
 		// Q TTL must outlive slow Turnstile; onExpire frees reserved seat (was leaking → stuck).
 		email := h.Email
@@ -758,7 +761,7 @@ func (e *Engine) pWorker(ctx context.Context, id int) {
 		}
 		e.qPending.Release()
 		// seat stays reserved until signup fail / oauth fail / CPA success / Q TTL expire
-		log.Debugf("[P%d] Q ready %s (reserved=%d done=%d/%d)", id, h.Email, e.reserved.Load(), e.done.Load(), e.opt.Target)
+		log.Infof("[P%d] 准备池就绪 %s (reserved=%d done=%d/%d)", id, h.Email, e.reserved.Load(), e.done.Load(), e.opt.Target)
 	}
 }
 
