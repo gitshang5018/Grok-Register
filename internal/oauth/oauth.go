@@ -350,7 +350,10 @@ func isDeviceDone(loc string) bool {
 		return strings.Contains(loc, "/oauth2/device/done")
 	}
 	p := u.Path
-	return strings.Contains(p, "/oauth2/device/done") || strings.HasSuffix(p, "/device/done")
+	return strings.Contains(p, "/oauth2/device/done") || 
+	       strings.HasSuffix(p, "/device/done") || 
+	       p == "/account" || 
+	       strings.HasPrefix(p, "/console")
 }
 
 func isSignInRedirect(loc string) bool {
@@ -549,6 +552,37 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			if isSignInRedirect(next) {
 				return fmt.Errorf("sso_rejected approve-redirect→sign-in")
 			}
+			// X.ai now returns 307 to /account, meaning we must re-POST the form data there
+			if resp2.StatusCode == 307 {
+				c.logDiag("following 307 POST to %q", next)
+				req3, err3 := http.NewRequestWithContext(ctx, http.MethodPost, next, strings.NewReader(form.Encode()))
+				if err3 == nil {
+					c.setFormHeaders(req3, consentRef, cookie)
+					req3.Header.Set("Origin", "https://"+req3.URL.Host)
+					if resp3, err3 := c.http.Do(req3); err3 == nil {
+						aloc3 := resp3.Header.Get("Location")
+						body3, _ := io.ReadAll(io.LimitReader(resp3.Body, 1<<20))
+						_ = resp3.Body.Close()
+						cookie = mergeSetCookies(cookie, resp3.Header)
+						c.logDiag("confirm_approve follow 307 status=%d loc=%q bodyLen=%d", resp3.StatusCode, trimLoc(aloc3), len(body3))
+						
+						// Next location might be the real done page or just a 200/302
+						if authorizedBody(string(body3)) || isDeviceDone(aloc3) {
+							c.ClearRateLimit()
+							return nil
+						}
+						// If it's a 302 to /account or something, just consider it success if the token endpoint accepts it
+						if isRedirect(resp3.StatusCode) {
+							next3 := absURL("https://accounts.x.ai", aloc3)
+							if isDeviceDone(next3) || strings.HasSuffix(next3, "/account") {
+								c.ClearRateLimit()
+								return nil
+							}
+						}
+					}
+				}
+			}
+
 			if st, b, newCookie, err := c.getWithCookie(ctx, next, cookie); err == nil {
 				if newCookie != "" {
 					cookie = newCookie
@@ -933,7 +967,7 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 				strings.Contains(err.Error(), "device_verify")) {
 				continue
 			}
-			return Credential{}, err
+			return Credential{}, fmt.Errorf("%w [diag: %s]", err, c.getDiags())
 		}
 		cred, err := c.PollToken(ctx, flow)
 		if err != nil {
