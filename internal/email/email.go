@@ -25,15 +25,18 @@ var bannedDomains = map[string]struct{}{
 }
 
 var codeRe = []*regexp.Regexp{
-	// 1. Highest priority: code/verification/verify/grok context followed by 6-char code
-	regexp.MustCompile(`(?i)(?:code|verification|verify|grok|confirm|confirmation)[^A-Z0-9]{0,30}\b([A-Z0-9]{3}-?[A-Z0-9]{3})\b`),
+	// 1. Highest priority: code/verification context + any separator (non-greedy) + 6-char code
+	//    e.g. "Your verification code is TFIHSY" or "code: 0BJOQ4"
+	regexp.MustCompile(`(?i)(?:code|verification|verify|grok|confirm|confirmation).{0,60}?\b([A-Z0-9]{3}-?[A-Z0-9]{3})\b`),
 	// 2. HTML tag enclosed code
 	regexp.MustCompile(`>([A-Z0-9]{3}-[A-Z0-9]{3})<`),
 	regexp.MustCompile(`>([A-Z0-9]{6})<`),
-	// 3. Exact 3-3 format
+	// 3. Exact 3-3 format with dash
 	regexp.MustCompile(`\b([A-Z0-9]{3}-[A-Z0-9]{3})\b`),
 	// 4. Exact 6-digit number
 	regexp.MustCompile(`\b([0-9]{6})\b`),
+	// 5. Standalone 6-char uppercase alphanumeric (fallback for TFIHSY/UJVOQO/0BJOQ4 etc.)
+	regexp.MustCompile(`\b([A-Z0-9]{6})\b`),
 }
 
 type Handle struct {
