@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +105,17 @@ func NewClient(proxy string, cm *clearance.Manager, baseCooldown time.Duration) 
 		c.ua = cm.UserAgent()
 	}
 	return c, nil
+}
+
+func (c *Client) logDiag(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[oauth-diag] "+format+"\n", args...)
+}
+
+func trimLoc(loc string) string {
+	if len(loc) > 80 {
+		return loc[:80] + "…"
+	}
+	return loc
 }
 
 func (c *Client) WaitRateLimit(ctx context.Context) error {
@@ -365,10 +377,11 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 
 	// Warm: open verification page so auth.x.ai sees cookie session (optional).
 	if flow.VerificationURL != "" {
-		_, _, warmCookie, _ := c.getWithCookie(ctx, flow.VerificationURL, cookie)
-		if warmCookie != "" {
+		warmSt, _, warmCookie, warmErr := c.getWithCookie(ctx, flow.VerificationURL, cookie)
+		if warmErr == nil && warmCookie != "" {
 			cookie = warmCookie
 		}
+		c.logDiag("confirm_warm status=%d err=%v", warmSt, warmErr)
 	}
 
 	// verify
@@ -387,6 +400,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	_ = resp.Body.Close()
 	// Merge any Set-Cookie (session) into cookie jar string for subsequent posts.
 	cookie = mergeSetCookies(cookie, resp.Header)
+	c.logDiag("confirm_verify status=%d loc=%q bodyLen=%d", resp.StatusCode, trimLoc(loc), len(vbody))
 	if err := locationError(loc); err != nil {
 		if errors.Is(err, ErrRateLimited) {
 			c.TripRateLimit()
@@ -400,10 +414,12 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		return fmt.Errorf("sso_rejected verify→sign-in (SSO cookie not accepted by auth.x.ai)")
 	}
 	if isDeviceDone(loc) {
+		c.logDiag("confirm_verify → done (fast path)")
 		c.ClearRateLimit()
 		return nil
 	}
 	if authorizedBody(string(vbody)) && isRedirect(resp.StatusCode) {
+		c.logDiag("confirm_verify → authorized (body match)")
 		c.ClearRateLimit()
 		return nil
 	}
@@ -487,15 +503,18 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			return fmt.Errorf("sso_rejected approve→sign-in")
 		}
 		if authorizedBody(string(body)) || isDeviceDone(aloc) {
+			c.logDiag("confirm_approve → authorized (attempt=%d)", attempt)
 			c.ClearRateLimit()
 			return nil
 		}
+		c.logDiag("confirm_approve status=%d loc=%q bodyLen=%d attempt=%d", resp2.StatusCode, trimLoc(aloc), len(body), attempt)
 		if isRedirect(resp2.StatusCode) && aloc != "" {
 			next := absURL("https://auth.x.ai", aloc)
 			if !strings.Contains(next, "auth.x.ai") && !strings.Contains(next, "accounts.x.ai") {
 				next = absURL("https://accounts.x.ai", aloc)
 			}
 			if isDeviceDone(next) {
+				c.logDiag("confirm_approve → done via redirect")
 				c.ClearRateLimit()
 				return nil
 			}
@@ -506,11 +525,11 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 				if newCookie != "" {
 					cookie = newCookie
 				}
+				c.logDiag("confirm_approve follow status=%d authorized=%v", st, authorizedBody(b))
 				if authorizedBody(b) || isDeviceDone(next) {
 					c.ClearRateLimit()
 					return nil
 				}
-				_ = st
 			}
 			// retry once with minimal form if first attempt used HTML overlay
 			if attempt == 0 && len(aform) > 4 {
@@ -858,13 +877,6 @@ func truncateBody(b []byte, n int) string {
 	return s[:n]
 }
 
-func trimLoc(s string) string {
-	if len(s) <= 120 {
-		return s
-	}
-	return s[:120] + "…"
-}
-
 // Exchange is convenience: start flow + confirm HTTP + poll.
 // On rate_limited / device 429 / invalid_grant, retry with a fresh device code.
 func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
@@ -899,10 +911,13 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 			last = err
 			// invalid_grant: consent did not stick — settle & re-approve before new device flow
 			if attempt < 2 && strings.Contains(err.Error(), "invalid_grant") {
+				// Longer settle for auth.x.ai session cluster sync
+				settle := 5*time.Second + time.Duration(attempt)*3*time.Second
+				c.logDiag("invalid_grant retry attempt=%d settle=%s", attempt, settle)
 				select {
 				case <-ctx.Done():
 					return Credential{}, ctx.Err()
-				case <-time.After(3 * time.Second):
+				case <-time.After(settle):
 				}
 				// Retry ConfirmHTTP with SSO to let auth.x.ai session sync complete
 				if reErr := c.ConfirmHTTP(ctx, sso, flow); reErr == nil {
