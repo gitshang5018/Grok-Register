@@ -67,11 +67,13 @@ type Client struct {
 	probeToken int
 	probeSeq   int
 
-	// OIDC discovery cache (device + token endpoints)
 	discMu   sync.Mutex
 	deviceEP string
 	tokenEP  string
 	discAt   time.Time
+
+	diagMu sync.Mutex
+	diags  []string
 }
 
 func NewClient(proxy string, cm *clearance.Manager, baseCooldown time.Duration) (*Client, error) {
@@ -108,7 +110,26 @@ func NewClient(proxy string, cm *clearance.Manager, baseCooldown time.Duration) 
 }
 
 func (c *Client) logDiag(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "[oauth-diag] "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "[oauth-diag] "+msg+"\n")
+	c.diagMu.Lock()
+	if len(c.diags) > 50 {
+		c.diags = c.diags[1:]
+	}
+	c.diags = append(c.diags, msg)
+	c.diagMu.Unlock()
+}
+
+func (c *Client) clearDiags() {
+	c.diagMu.Lock()
+	c.diags = nil
+	c.diagMu.Unlock()
+}
+
+func (c *Client) getDiags() string {
+	c.diagMu.Lock()
+	defer c.diagMu.Unlock()
+	return strings.Join(c.diags, " | ")
 }
 
 func trimLoc(loc string) string {
@@ -880,6 +901,7 @@ func truncateBody(b []byte, n int) string {
 // Exchange is convenience: start flow + confirm HTTP + poll.
 // On rate_limited / device 429 / invalid_grant, retry with a fresh device code.
 func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
+	c.clearDiags()
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := c.WaitRateLimit(ctx); err != nil {
@@ -923,11 +945,13 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 				if reErr := c.ConfirmHTTP(ctx, sso, flow); reErr == nil {
 					if cred2, err2 := c.PollToken(ctx, flow); err2 == nil {
 						return cred2, nil
+					} else {
+						return Credential{}, fmt.Errorf("%w [diag: %s]", err2, c.getDiags())
 					}
 				}
 				continue
 			}
-			return Credential{}, err
+			return Credential{}, fmt.Errorf("%w [diag: %s]", err, c.getDiags())
 		}
 		return cred, nil
 	}
