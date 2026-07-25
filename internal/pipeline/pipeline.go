@@ -545,6 +545,7 @@ shutdown:
 	waitGroupTimeout(&e.wgUpload, uploadWait, log, "cpa upload")
 	waitGroupTimeout(&e.wgSub2API, uploadWait, log, "sub2api import")
 	waitGroupTimeout(&e.wgAux, 3*time.Second, log, "aux")
+	turnstile.CleanupOrphanProcesses()
 
 	_ = st.Set(func(s *state.Snapshot) {
 		if s.Status != state.StatusError {

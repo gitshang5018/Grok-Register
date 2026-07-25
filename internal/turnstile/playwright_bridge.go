@@ -96,29 +96,47 @@ func (p *PlaywrightBridge) Solve(ctx context.Context, siteKey, pageURL string) (
 	args = append(args, "--mode", mode)
 
 	bin, binArgs := maybeXvfb(p.Python, args, mode)
-	cmd := exec.CommandContext(ctx, bin, binArgs...)
-	// inherit solver knobs
+	cmd := exec.Command(bin, binArgs...)
 	cmd.Env = os.Environ()
+	setProcessGroup(cmd)
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	out := strings.TrimSpace(stdout.String())
-	errText := strings.TrimSpace(stderr.String())
-	if err != nil {
-		if errText == "" {
-			errText = err.Error()
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("playwright mint start: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		killProcessGroup(cmd)
+		return "", fmt.Errorf("playwright mint: %v", ctx.Err())
+	case err := <-done:
+		out := strings.TrimSpace(stdout.String())
+		errText := strings.TrimSpace(stderr.String())
+		if err != nil {
+			killProcessGroup(cmd)
+			if errText == "" {
+				errText = err.Error()
+			}
+			return "", fmt.Errorf("playwright mint: %s", truncate(errText, 300))
 		}
-		return "", fmt.Errorf("playwright mint: %s", truncate(errText, 300))
+		if len(out) <= 10 {
+			killProcessGroup(cmd)
+			return "", fmt.Errorf("playwright mint: empty token %s", truncate(errText, 200))
+		}
+		// token must be single line
+		if i := strings.IndexByte(out, '\n'); i >= 0 {
+			out = strings.TrimSpace(out[:i])
+		}
+		return out, nil
 	}
-	if len(out) <= 10 {
-		return "", fmt.Errorf("playwright mint: empty token %s", truncate(errText, 200))
-	}
-	// token must be single line
-	if i := strings.IndexByte(out, '\n'); i >= 0 {
-		out = strings.TrimSpace(out[:i])
-	}
-	return out, nil
 }
 
 // DetectedPython / DetectedScript expose resolved mint paths for startup logs.

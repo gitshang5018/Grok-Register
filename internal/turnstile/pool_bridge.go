@@ -114,6 +114,7 @@ func (p *PoolBridge) start(ctx context.Context) error {
 	bin, binArgs := maybeXvfb(p.Python, args, mode)
 	cmd := exec.Command(bin, binArgs...)
 	cmd.Env = os.Environ()
+	setProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -309,9 +310,8 @@ func (p *PoolBridge) kill() error {
 		_, _ = stdin.WriteString(`{"cmd":"shutdown"}` + "\n")
 		_ = stdin.Flush()
 	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+	if cmd != nil {
+		killProcessGroup(cmd)
 	}
 	return nil
 }
