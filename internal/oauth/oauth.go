@@ -534,7 +534,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		if isSignInRedirect(aloc) {
 			return fmt.Errorf("sso_rejected approve→sign-in")
 		}
-		if authorizedBody(string(body)) || isDeviceDone(aloc) {
+		if (authorizedBody(string(body)) || isDeviceDone(aloc)) && resp2.StatusCode != 307 {
 			c.logDiag("confirm_approve → authorized (attempt=%d)", attempt)
 			c.ClearRateLimit()
 			return nil
@@ -544,14 +544,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			if !strings.Contains(next, "auth.x.ai") && !strings.Contains(next, "accounts.x.ai") {
 				next = absURL("https://accounts.x.ai", aloc)
 			}
-			if isDeviceDone(next) {
-				c.logDiag("confirm_approve → done via redirect")
-				c.ClearRateLimit()
-				return nil
-			}
-			if isSignInRedirect(next) {
-				return fmt.Errorf("sso_rejected approve-redirect→sign-in")
-			}
+
 			// X.ai now returns 307 to /account, meaning we must re-POST the form data there
 			if resp2.StatusCode == 307 {
 				c.logDiag("following 307 POST to %q", next)
@@ -581,6 +574,15 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 						}
 					}
 				}
+			}
+
+			if isDeviceDone(next) {
+				c.logDiag("confirm_approve → done via redirect")
+				c.ClearRateLimit()
+				return nil
+			}
+			if isSignInRedirect(next) {
+				return fmt.Errorf("sso_rejected approve-redirect→sign-in")
 			}
 
 			if st, b, newCookie, err := c.getWithCookie(ctx, next, cookie); err == nil {
