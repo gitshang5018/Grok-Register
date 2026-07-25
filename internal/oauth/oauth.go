@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +112,7 @@ func NewClient(proxy string, cm *clearance.Manager, baseCooldown time.Duration) 
 
 func (c *Client) logDiag(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(os.Stderr, "[oauth-diag] "+msg+"\n")
+	fmt.Fprint(os.Stderr, "[oauth-diag] ", msg, "\n")
 	c.diagMu.Lock()
 	if len(c.diags) > 50 {
 		c.diags = c.diags[1:]
@@ -465,21 +466,21 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	// Diagnostic context for operators (short).
 	_ = fmt.Sprintf("verify status=%d loc=%s", resp.StatusCode, trimLoc(loc))
 
-	// Minimal form matching historical working Python client (empty principal_id OK).
-	// Then overlay non-empty fields from consent HTML (csrf / principal_id).
+	// Base approve form. principal_id is REQUIRED for a real device grant on current
+	// auth.x.ai — empty principal_id often yields /device/done + token invalid_grant.
+	// SSO JWT only has session_id; principal_id comes from consent page userId state.
 	aform := url.Values{
 		"user_code":      {flow.UserCode},
 		"action":         {"allow"},
 		"principal_type": {"User"},
+		"principal_id":   {""},
 	}
 	if pid := principalFromSSO(sso); pid != "" {
 		aform.Set("principal_id", pid)
 	}
+	// Prefer auth.x.ai approve (matches consent form action). accounts.x.ai may 30x.
 	approveTarget := ApproveURL
-	if strings.Contains(consentRef, "accounts.x.ai") {
-		approveTarget = "https://accounts.x.ai/oauth2/device/approve"
-	}
-	if fields, htmlCookie, formAction := c.loadConsentForm(ctx, consentRef, cookie); len(fields) > 0 {
+	if fields, htmlCookie, formAction := c.loadConsentForm(ctx, consentRef, cookie); len(fields) > 0 || formAction != "" {
 		cookie = htmlCookie
 		if formAction != "" {
 			approveTarget = absURL(consentRef, formAction)
@@ -493,7 +494,6 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 				aform.Set(k, vs[0])
 			}
 		}
-		aform.Set("action", "allow")
 		if aform.Get("user_code") == "" {
 			aform.Set("user_code", flow.UserCode)
 		}
@@ -501,29 +501,41 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			aform.Set("principal_type", "User")
 		}
 	}
+	// Always force allow after HTML overlay.
+	aform.Set("action", "allow")
+	if aform.Get("principal_id") == "" {
+		c.logDiag("confirm_approve missing principal_id (SSO has no user id; consent parse failed)")
+		return fmt.Errorf("consent_missing_principal_id")
+	}
+	// Form action from consent is usually https://auth.x.ai/oauth2/device/approve
+	if approveTarget == "" || (!strings.Contains(approveTarget, "auth.x.ai") && !strings.Contains(approveTarget, "accounts.x.ai")) {
+		approveTarget = ApproveURL
+	}
 
-	c.logDiag("confirm_approve form keys: %d (principal_id=%t)", len(aform), aform.Get("principal_id") != "")
+	c.logDiag("confirm_approve form keys: %d (principal_id=%t pid=%s)", len(aform), aform.Get("principal_id") != "", trimLoc(aform.Get("principal_id")))
 
 	fallbackForm := url.Values{
 		"user_code":      {flow.UserCode},
 		"action":         {"allow"},
 		"principal_type": {"User"},
-	}
-	if pid := aform.Get("principal_id"); pid != "" {
-		fallbackForm.Set("principal_id", pid)
+		"principal_id":   {aform.Get("principal_id")},
 	}
 
 	// Try approve; if incomplete, one more attempt with only core fields (no HTML overlay).
 	for attempt, form := range []url.Values{aform, fallbackForm} {
-		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, approveTarget, strings.NewReader(form.Encode()))
+		// Prefer auth.x.ai for approve — cookie is sent via header, host must match form action.
+		target := approveTarget
+		if attempt == 1 {
+			target = ApproveURL
+		}
+		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(form.Encode()))
 		if err != nil {
 			return err
 		}
 		c.setFormHeaders(req2, consentRef, cookie)
-		
-		// The browser sends the Origin of the page hosting the form (accounts.x.ai).
-		if refU, err := url.Parse(consentRef); err == nil && refU.Host != "" {
-			req2.Header.Set("Origin", "https://"+refU.Host)
+		// Origin/Referer must match the consent page host (accounts.x.ai).
+		if refU, err := url.Parse(consentRef); err == nil && refU.Scheme != "" && refU.Host != "" {
+			req2.Header.Set("Origin", refU.Scheme+"://"+refU.Host)
 		} else {
 			req2.Header.Set("Origin", "https://accounts.x.ai")
 		}
@@ -547,7 +559,8 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			return fmt.Errorf("sso_rejected approve→sign-in")
 		}
 		if (authorizedBody(string(body)) || isDeviceDone(aloc)) && resp2.StatusCode != 307 {
-			c.logDiag("confirm_approve → authorized (attempt=%d)", attempt)
+			// Provisional only — PollToken is the real success signal.
+			c.logDiag("confirm_approve → authorized provisional (attempt=%d has_pid=%t)", attempt, form.Get("principal_id") != "")
 			c.ClearRateLimit()
 			return nil
 		}
@@ -593,7 +606,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			}
 
 			if isDeviceDone(next) {
-				c.logDiag("confirm_approve → done via redirect")
+				c.logDiag("confirm_approve → done via redirect (provisional)")
 				c.ClearRateLimit()
 				return nil
 			}
@@ -694,6 +707,10 @@ func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string)
 	if err != nil || st >= 400 {
 		return nil, cookie, ""
 	}
+	
+	// DEBUG: write html to file
+	_ = os.WriteFile("consent_debug.html", []byte(html), 0644)
+	
 	fields, action := parseHTMLFormFields(html)
 	return fields, newCookie, action
 }
@@ -753,7 +770,35 @@ func parseHTMLFormFields(html string) (url.Values, string) {
 		}
 	}
 
+	// Consent HTML often embeds React Query / RSC state with escaped JSON:
+	//   \"userId\":\"56f924f3-2ffd-4eeb-931a-dc4db062d1d3\"
+	// The hidden form input principal_id is frequently empty; pull userId from state.
+	if pid := extractPrincipalID(html); pid != "" {
+		out.Set("principal_id", pid)
+	}
 	return out, action
+}
+
+// extractPrincipalID finds the accounts.x.ai user UUID in consent HTML / RSC payload.
+// SSO session JWT only carries session_id — principal_id must come from the page state.
+func extractPrincipalID(html string) string {
+	patterns := []string{
+		// Most common on accounts.x.ai consent (backslash-escaped JSON inside a JS string)
+		`userId\\":\\"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`,
+		// Plain JSON
+		`"userId"\s*:\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"`,
+		// Double-escaped key/value
+		`\\"userId\\"\s*:\s*\\"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\\"`,
+		// Loose fallback near userId key
+		`(?i)userId[^0-9a-fA-F]{0,12}([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`,
+	}
+	for _, p := range patterns {
+		re := regexp.MustCompile(p)
+		if m := re.FindStringSubmatch(html); len(m) > 1 && m[1] != "" {
+			return m[1]
+		}
+	}
+	return ""
 }
 
 func attrValue(tag, attr string) string {
@@ -847,6 +892,7 @@ func (c *Client) PollToken(ctx context.Context, flow DeviceFlow) (Credential, er
 		form.Set("client_id", ClientID)
 		form.Set("device_code", flow.DeviceCode)
 		form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, flow.TokenEndpoint, strings.NewReader(form.Encode()))
 		if err != nil {
 			return Credential{}, err
@@ -1010,10 +1056,12 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 			if errors.Is(err, ErrRateLimited) && attempt < 2 {
 				continue
 			}
-			// challenge / unknown_page: one more full attempt with new device code
+			// Recoverable confirm failures: new device code
 			if attempt < 2 && (strings.Contains(err.Error(), "challenge") ||
 				strings.Contains(err.Error(), "unknown_page") ||
-				strings.Contains(err.Error(), "device_verify")) {
+				strings.Contains(err.Error(), "device_verify") ||
+				strings.Contains(err.Error(), "consent_missing_principal_id") ||
+				strings.Contains(err.Error(), "device_approve")) {
 				continue
 			}
 			return Credential{}, fmt.Errorf("%w [diag: %s]", err, c.getDiags())
@@ -1021,23 +1069,15 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 		cred, err := c.PollToken(ctx, flow)
 		if err != nil {
 			last = err
-			// invalid_grant: consent did not stick — settle & re-approve before new device flow
+			// invalid_grant: device grant did not stick. Do NOT re-approve the same
+			// device_code (already spent -> invalid_code). Open a fresh device flow.
 			if attempt < 2 && strings.Contains(err.Error(), "invalid_grant") {
-				// Longer settle for auth.x.ai session cluster sync
-				settle := 5*time.Second + time.Duration(attempt)*3*time.Second
-				c.logDiag("invalid_grant retry attempt=%d settle=%s", attempt, settle)
+				settle := 2*time.Second + time.Duration(attempt)*2*time.Second
+				c.logDiag("invalid_grant -> new device flow attempt=%d settle=%s", attempt, settle)
 				select {
 				case <-ctx.Done():
 					return Credential{}, ctx.Err()
 				case <-time.After(settle):
-				}
-				// Retry ConfirmHTTP with SSO to let auth.x.ai session sync complete
-				if reErr := c.ConfirmHTTP(ctx, sso, flow); reErr == nil {
-					if cred2, err2 := c.PollToken(ctx, flow); err2 == nil {
-						return cred2, nil
-					} else {
-						return Credential{}, fmt.Errorf("%w [diag: %s]", err2, c.getDiags())
-					}
 				}
 				continue
 			}
