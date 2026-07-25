@@ -471,7 +471,6 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		"user_code":      {flow.UserCode},
 		"action":         {"allow"},
 		"principal_type": {"User"},
-		"principal_id":   {""},
 	}
 	if pid := principalFromSSO(sso); pid != "" {
 		aform.Set("principal_id", pid)
@@ -505,20 +504,30 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 
 	c.logDiag("confirm_approve form keys: %d (principal_id=%t)", len(aform), aform.Get("principal_id") != "")
 
-	// Try approve; if incomplete, one more attempt with only core fields (no HTML overlay).
-	for attempt, form := range []url.Values{aform, {
+	fallbackForm := url.Values{
 		"user_code":      {flow.UserCode},
 		"action":         {"allow"},
 		"principal_type": {"User"},
-		"principal_id":   {aform.Get("principal_id")},
-	}} {
+	}
+	if pid := aform.Get("principal_id"); pid != "" {
+		fallbackForm.Set("principal_id", pid)
+	}
+
+	// Try approve; if incomplete, one more attempt with only core fields (no HTML overlay).
+	for attempt, form := range []url.Values{aform, fallbackForm} {
 		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, approveTarget, strings.NewReader(form.Encode()))
 		if err != nil {
 			return err
 		}
 		c.setFormHeaders(req2, consentRef, cookie)
-		// Dynamic Origin header matching request host (auth.x.ai) to satisfy CORS / same-origin security
-		req2.Header.Set("Origin", "https://"+req2.URL.Host)
+		
+		// The browser sends the Origin of the page hosting the form (accounts.x.ai).
+		if refU, err := url.Parse(consentRef); err == nil && refU.Host != "" {
+			req2.Header.Set("Origin", "https://"+refU.Host)
+		} else {
+			req2.Header.Set("Origin", "https://accounts.x.ai")
+		}
+
 		resp2, err := c.http.Do(req2)
 		if err != nil {
 			return err
@@ -554,7 +563,11 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 				req3, err3 := http.NewRequestWithContext(ctx, http.MethodPost, next, strings.NewReader(form.Encode()))
 				if err3 == nil {
 					c.setFormHeaders(req3, consentRef, cookie)
-					req3.Header.Set("Origin", "https://"+req3.URL.Host)
+					if refU, err := url.Parse(consentRef); err == nil && refU.Host != "" {
+						req3.Header.Set("Origin", "https://"+refU.Host)
+					} else {
+						req3.Header.Set("Origin", "https://accounts.x.ai")
+					}
 					if resp3, err3 := c.http.Do(req3); err3 == nil {
 						aloc3 := resp3.Header.Get("Location")
 						body3, _ := io.ReadAll(io.LimitReader(resp3.Body, 1<<20))
@@ -717,6 +730,29 @@ func parseHTMLFormFields(html string) (url.Values, string) {
 		val := attrValue(tag, "value")
 		out.Set(name, val)
 	}
+
+	// Also scan for <meta name="_csrf" content="...">
+	for i := 0; i < len(html); {
+		idx := strings.Index(strings.ToLower(lower[i:]), "<meta")
+		if idx < 0 {
+			break
+		}
+		i += idx
+		end := strings.Index(lower[i:], ">")
+		if end < 0 {
+			break
+		}
+		tag := html[i : i+end]
+		i += end + 1
+		name := attrValue(tag, "name")
+		if name == "_csrf" || name == "csrf-token" {
+			val := attrValue(tag, "content")
+			if val != "" {
+				out.Set("_csrf", val)
+			}
+		}
+	}
+
 	return out, action
 }
 
