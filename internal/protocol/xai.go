@@ -37,11 +37,24 @@ const (
 )
 
 var (
-	siteKeyRe = regexp.MustCompile(`0x4AAAAAAA[a-zA-Z0-9_-]+`)
-	jsSrcRe   = regexp.MustCompile(`src="(/_next/static/[^"]+\.js)"`)
-	hex40Re   = regexp.MustCompile(`[a-fA-F0-9]{40,50}`)
-	flightRe  = regexp.MustCompile(`self\.__next_f\.push\(\[1,"(.*?)"\]\)`)
+	siteKeyRe   = regexp.MustCompile(`0x4AAAAAAA[a-zA-Z0-9_-]+`)
+	jsSrcRe     = regexp.MustCompile(`src="(/_next/static/[^"]+\.js)"`)
+	hex40Re     = regexp.MustCompile(`[a-fA-F0-9]{40,50}`)
+	flightRe    = regexp.MustCompile(`self\.__next_f\.push\(\[1,"(.*?)"\]\)`)
+	castlePKRe1 = regexp.MustCompile(`castlePk\\":\\"([^\\"]+)`)
+	castlePKRe2 = regexp.MustCompile(`castlePk":"([^"]+)"`)
+	castlePKRe3 = regexp.MustCompile(`"(pk_[A-Za-z0-9]{16,})"`)
 )
+
+// scrapeCastlePK extracts Castle publishable key from sign-up HTML/RSC payload.
+func scrapeCastlePK(html string) string {
+	for _, re := range []*regexp.Regexp{castlePKRe1, castlePKRe2, castlePKRe3} {
+		if m := re.FindStringSubmatch(html); len(m) > 1 && strings.HasPrefix(m[1], "pk_") {
+			return m[1]
+		}
+	}
+	return ""
+}
 
 // ClientOptions configures protocol HTTP client.
 type ClientOptions struct {
@@ -56,6 +69,8 @@ type SignupConfig struct {
 	SiteKey   string
 	ActionID  string
 	StateTree string
+	// CastlePK is the Castle publishable key scraped from sign-up page (enableCastle).
+	CastlePK  string
 	Source    string
 }
 
@@ -195,6 +210,10 @@ func (c *Client) FetchConfig() (SignupConfig, error) {
 	if m := siteKeyRe.FindString(html); m != "" {
 		cfg.SiteKey = m
 	}
+	if pk := scrapeCastlePK(html); pk != "" {
+		cfg.CastlePK = pk
+		cfg.Source += "+castle_pk"
+	}
 	cfg.StateTree = scrapeStateTree(html)
 	if cfg.StateTree == "" {
 		cfg.StateTree = url.QueryEscape(DefaultRouterStateTreeJSON)
@@ -224,6 +243,11 @@ func (c *Client) FetchConfig() (SignupConfig, error) {
 	if cfg.SiteKey == "" {
 		cfg.SiteKey = "0x4AAAAAAAhr9JGVDZbrZOo0"
 		cfg.Source += "+default_sitekey"
+	}
+	if cfg.CastlePK == "" {
+		// Known accounts.x.ai publishable key (page enableCastle=true).
+		cfg.CastlePK = "pk_p8GGWvD3TmFJZRsX3BQcqAv9aFVispNz"
+		cfg.Source += "+default_castle_pk"
 	}
 	if cfg.SiteKey == "" || cfg.ActionID == "" || cfg.StateTree == "" {
 		return cfg, Failf(CodeConfig, "config incomplete site_key=%v action=%v state=%v", cfg.SiteKey != "", cfg.ActionID != "", cfg.StateTree != "")

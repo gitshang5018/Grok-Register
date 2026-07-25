@@ -73,6 +73,11 @@ type Config struct {
 	ProbeEnabled        bool
 	ProbeWarmupSec      float64 // sleep before first probe (default 5)
 
+	// Castle request tokens (required to avoid false_clean / no_token mark)
+	CastleEnabled bool   // default true: mint via browser SDK
+	CastlePK      string // publishable key; empty = scrape page / default pk
+	CastleRequire bool   // if true, fail create/signup when mint fails (default true)
+
 	HTTPProxy  string
 	HTTPSProxy string
 	NoProxy    string
@@ -125,6 +130,9 @@ func Defaults() Config {
 		OAuthWorkers:          0, // auto: 1 when thread≥3 or large target
 		ProbeEnabled:          true,
 		ProbeWarmupSec:        5, // stable: new tokens often 403 under 1.5–3s
+		CastleEnabled:         true,
+		CastlePK:              "",
+		CastleRequire:         true,
 		HTTPProxy:             "http://127.0.0.1:40080",
 		HTTPSProxy:            "http://127.0.0.1:40080",
 		NoProxy:               "127.0.0.1,localhost",
@@ -260,6 +268,11 @@ func Save(path string, cfg Config) error {
 	b.WriteString(fmt.Sprintf("NO_PROXY=%s\n", cfg.NoProxy))
 	b.WriteString(fmt.Sprintf("PROBE_ENABLED=%s\n", bool01(cfg.ProbeEnabled)))
 	b.WriteString(fmt.Sprintf("PROBE_WARMUP_SEC=%g\n", cfg.ProbeWarmupSec))
+	b.WriteString(fmt.Sprintf("CASTLE_ENABLED=%s\n", bool01(cfg.CastleEnabled)))
+	if cfg.CastlePK != "" {
+		b.WriteString(fmt.Sprintf("CASTLE_PK=%s\n", cfg.CastlePK))
+	}
+	b.WriteString(fmt.Sprintf("CASTLE_REQUIRE=%s\n", bool01(cfg.CastleRequire)))
 	b.WriteString(fmt.Sprintf("OAUTH_MIN_INTERVAL_SEC=%g\n", cfg.OAuthMinIntervalSec))
 	b.WriteString(fmt.Sprintf("OAUTH_RETRY_SEC=%g\n", cfg.OAuthRetrySec))
 	b.WriteString(fmt.Sprintf("OAUTH_WORKERS=%d\n", cfg.OAuthWorkers))
@@ -519,6 +532,15 @@ func applyMap(cfg *Config, env map[string]string) {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			cfg.ProbeWarmupSec = f
 		}
+	}
+	if v, ok := env["CASTLE_ENABLED"]; ok {
+		cfg.CastleEnabled = truthy(v)
+	}
+	if v, ok := env["CASTLE_PK"]; ok {
+		cfg.CastlePK = strings.TrimSpace(v)
+	}
+	if v, ok := env["CASTLE_REQUIRE"]; ok {
+		cfg.CastleRequire = truthy(v)
 	}
 	if v, ok := env["OAUTH_MIN_INTERVAL_SEC"]; ok {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {

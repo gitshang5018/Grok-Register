@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/grok-free-register/grok-reg/internal/castle"
 	"github.com/grok-free-register/grok-reg/internal/clearance"
 	"github.com/grok-free-register/grok-reg/internal/config"
 	"github.com/grok-free-register/grok-reg/internal/cpa"
@@ -56,6 +57,8 @@ type Engine struct {
 	xai             *protocol.Client
 	mail            *email.Provider
 	turn            turnstile.Provider
+	castle          castle.Minter
+	castlePK        string
 	oauth           *oauth.Client
 	inv             *inventory.Inventory[string, QItem]
 	phys            *inventory.Semaphore
@@ -338,6 +341,25 @@ func (e *Engine) run(ctx context.Context) error {
 	}
 	log.Infof("Turnstile provider=%s mode=%s workers=%d (pool → one-shot → chromedp)", e.turn.Name(), tsMode, sWorkers)
 	log.Infof("Turnstile mint: python=%s pool=%s script=%s", turnstile.DetectedPython(), turnstile.DetectedPoolScript(), turnstile.DetectedScript())
+
+	// Castle request tokens — empty token → permanent false_clean (no_token @ $registration)
+	e.castle = castle.New(castle.Options{
+		Enabled: cfg.CastleEnabled,
+		PK:      cfg.CastlePK,
+		Proxy:   cfg.RegisterProxy,
+		Clear:   e.cm,
+		Mode:    tsMode,
+		Timeout: 70 * time.Second,
+	})
+	if cl, ok := e.castle.(castle.Closer); ok {
+		defer cl.Close()
+	}
+	if cfg.CastleEnabled {
+		log.Infof("Castle mint: enabled require=%v python=%s script=%s", cfg.CastleRequire, castle.DetectedPython(), castle.DetectedScript())
+	} else {
+		log.Warn("Castle mint: DISABLED — accounts will be marked false_clean (no_token)")
+	}
+
 	e.uploader = cpa.NewUploader(cpa.UploadConfig{
 		Enabled:      cfg.CPAUploadEnabled,
 		BaseURL:      cfg.CPAManagementBase,
@@ -449,6 +471,18 @@ func (e *Engine) run(ctx context.Context) error {
 			s.PhaseDetail = "配置获取失败"
 		})
 		return fmt.Errorf("config fetch: %w", err)
+	}
+	// Castle pk: config override > scraped page > default inside FetchConfig
+	e.castlePK = strings.TrimSpace(cfg.CastlePK)
+	if e.castlePK == "" {
+		e.castlePK = strings.TrimSpace(scfg.CastlePK)
+	}
+	if e.castlePK != "" {
+		pkShow := e.castlePK
+		if len(pkShow) > 16 {
+			pkShow = pkShow[:16] + "…"
+		}
+		log.Infof("Castle pk=%s (source=%s)", pkShow, scfg.Source)
 	}
 	log.Infof("SITE_KEY=%s ACTION_ID=%s… source=%s profile=%s", scfg.SiteKey, trim(scfg.ActionID, 12), scfg.Source, e.xai.Profile())
 	log.OKf("注册服务已启动 | 目标 %d | run=%s | impersonate=%s", e.opt.Target, e.opt.Run.RunID, e.xai.Profile())
@@ -729,7 +763,21 @@ func (e *Engine) pWorker(ctx context.Context, id int) {
 			continue
 		}
 		log.Infof("[P%d] 正在向 x.ai 发送验证码邮件 (%s)...", id, h.Email)
-		if err := e.xai.CreateEmailCode(h.Email); err != nil {
+		// Castle: mint a fresh request token for CreateEmailValidationCode
+		// (frontend: createRequestToken before F({email, castleRequestToken})).
+		castleTok, cerr := e.mintCastle(ctx, id, "create_email")
+		if cerr != nil {
+			e.qPending.Release()
+			e.releaseReserve()
+			log.Warnf("[P%d] castle mint(create) fail %s: %v", id, h.Email, cerr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+			continue
+		}
+		if err := e.xai.CreateEmailCodeCastle(h.Email, castleTok); err != nil {
 			e.qPending.Release()
 			e.releaseReserve()
 			log.Warnf("[P%d] 发送验证码失败 (%s): %v", id, h.Email, err)
@@ -797,7 +845,17 @@ func (e *Engine) cWorker(ctx context.Context, id int, scfg protocol.SignupConfig
 		if err := e.xai.ValidatePassword(q.Email, q.Password); err != nil {
 			log.Debugf("validate_password skip/fail %s: %v", q.Email, err)
 		}
-		body := protocol.BuildSignupBody(q.Email, q.Password, q.Code, token)
+		// Castle: fresh token for createUser (frontend mints again at submit).
+		// Reusing create-email token is wrong — Castle tokens are single-use / ~120s.
+		castleTok, cerr := e.mintCastle(ctx, id, "signup")
+		if cerr != nil {
+			log.Warnf("castle mint(signup) fail %s: %v", q.Email, cerr)
+			pair.Release()
+			e.fail.Add(1)
+			e.releaseReserve()
+			continue
+		}
+		body := protocol.BuildSignupBodyCastle(q.Email, q.Password, q.Code, token, castleTok)
 		text, sso, err := e.xai.SignupServerAction(body, scfg.ActionID, scfg.StateTree)
 		if sso == "" {
 			sso = protocol.ExtractSSOFromText(text)
@@ -979,6 +1037,52 @@ func (e *Engine) oauthWorker(ctx context.Context, id int) {
 		log.OKf("CPA 就绪 #%d/%d %s -> %s", d, e.opt.Target, job.Email, filepath.Base(path))
 		e.refreshState()
 	}
+}
+
+// mintCastle returns a Castle request token for create-email / signup.
+// When Castle is disabled, returns empty string (legacy path → accounts get no_token mark).
+// When CASTLE_REQUIRE=1 (default) and mint fails, returns error so caller aborts the attempt.
+func (e *Engine) mintCastle(ctx context.Context, workerID int, stage string) (string, error) {
+	if e == nil || e.castle == nil {
+		if e != nil && e.opt.Cfg.CastleRequire && e.opt.Cfg.CastleEnabled {
+			return "", fmt.Errorf("castle minter nil")
+		}
+		return "", nil
+	}
+	if !e.opt.Cfg.CastleEnabled {
+		return "", nil
+	}
+	// Serialize with Turnstile physical browser slots when available.
+	if e.phys != nil {
+		if err := e.phys.Acquire(ctx); err != nil {
+			return "", err
+		}
+		defer e.phys.Release()
+	}
+	pk := e.castlePK
+	if pk == "" {
+		pk = e.opt.Cfg.CastlePK
+	}
+	tok, err := e.castle.Mint(ctx, pk)
+	if err != nil {
+		if e.opt.Cfg.CastleRequire {
+			return "", fmt.Errorf("%s: %w", stage, err)
+		}
+		if e.opt.Log != nil {
+			e.opt.Log.Warnf("[castle] mint %s non-fatal: %v", stage, err)
+		}
+		return "", nil
+	}
+	if len(tok) <= 20 {
+		if e.opt.Cfg.CastleRequire {
+			return "", fmt.Errorf("%s: empty castle token", stage)
+		}
+		return "", nil
+	}
+	if e.opt.Log != nil {
+		e.opt.Log.Debugf("[castle] mint ok stage=%s worker=%d len=%d", stage, workerID, len(tok))
+	}
+	return tok, nil
 }
 
 func truncateRunes(s string, n int) string {
