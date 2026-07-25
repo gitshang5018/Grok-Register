@@ -476,8 +476,16 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	if pid := principalFromSSO(sso); pid != "" {
 		aform.Set("principal_id", pid)
 	}
-	if fields, htmlCookie := c.loadConsentForm(ctx, consentRef, cookie); len(fields) > 0 {
+	approveTarget := ApproveURL
+	if strings.Contains(consentRef, "accounts.x.ai") {
+		approveTarget = "https://accounts.x.ai/oauth2/device/approve"
+	}
+	if fields, htmlCookie, formAction := c.loadConsentForm(ctx, consentRef, cookie); len(fields) > 0 {
 		cookie = htmlCookie
+		if formAction != "" {
+			approveTarget = absURL(consentRef, formAction)
+			c.logDiag("dynamic form action: %q", approveTarget)
+		}
 		for k, vs := range fields {
 			if k == "action" {
 				continue // never take empty/deny from page
@@ -496,11 +504,6 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	}
 
 	c.logDiag("confirm_approve form keys: %d (principal_id=%t)", len(aform), aform.Get("principal_id") != "")
-
-	approveTarget := ApproveURL
-	if strings.Contains(consentRef, "accounts.x.ai") {
-		approveTarget = "https://accounts.x.ai/oauth2/device/approve"
-	}
 
 	// Try approve; if incomplete, one more attempt with only core fields (no HTML overlay).
 	for attempt, form := range []url.Values{aform, {
@@ -673,17 +676,25 @@ func (c *Client) getWithCookie(ctx context.Context, rawURL, cookie string) (int,
 }
 
 // loadConsentForm GETs consent page and extracts form fields (principal_id, csrf, etc.).
-func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string) (url.Values, string) {
+func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string) (url.Values, string, string) {
 	st, html, newCookie, err := c.getWithCookie(ctx, consentURL, cookie)
 	if err != nil || st >= 400 {
-		return nil, cookie
+		return nil, cookie, ""
 	}
-	fields := parseHTMLFormFields(html)
-	return fields, newCookie
+	fields, action := parseHTMLFormFields(html)
+	return fields, newCookie, action
 }
 
-func parseHTMLFormFields(html string) url.Values {
+func parseHTMLFormFields(html string) (url.Values, string) {
 	out := url.Values{}
+	action := ""
+	
+	lowHTML := strings.ToLower(html)
+	if formIdx := strings.Index(lowHTML, "<form"); formIdx >= 0 {
+		if end := strings.Index(html[formIdx:], ">"); end >= 0 {
+			action = attrValue(html[formIdx:formIdx+end], "action")
+		}
+	}
 	// input ... name="..." ... value="..." (order may vary)
 	lower := html
 	// naive scan for name= and value= pairs on input tags
@@ -706,7 +717,7 @@ func parseHTMLFormFields(html string) url.Values {
 		val := attrValue(tag, "value")
 		out.Set(name, val)
 	}
-	return out
+	return out, action
 }
 
 func attrValue(tag, attr string) string {
