@@ -492,6 +492,13 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		}
 	}
 
+	c.logDiag("confirm_approve form keys: %d (principal_id=%t)", len(aform), aform.Get("principal_id") != "")
+
+	approveTarget := ApproveURL
+	if strings.Contains(consentRef, "accounts.x.ai") {
+		approveTarget = "https://accounts.x.ai/oauth2/device/approve"
+	}
+
 	// Try approve; if incomplete, one more attempt with only core fields (no HTML overlay).
 	for attempt, form := range []url.Values{aform, {
 		"user_code":      {flow.UserCode},
@@ -499,7 +506,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		"principal_type": {"User"},
 		"principal_id":   {aform.Get("principal_id")},
 	}} {
-		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, ApproveURL, strings.NewReader(form.Encode()))
+		req2, err := http.NewRequestWithContext(ctx, http.MethodPost, approveTarget, strings.NewReader(form.Encode()))
 		if err != nil {
 			return err
 		}
@@ -520,6 +527,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			}
 			return fmt.Errorf("device_approve: %w", err)
 		}
+		c.logDiag("confirm_approve status=%d loc=%q bodyLen=%d attempt=%d", resp2.StatusCode, trimLoc(aloc), len(body), attempt)
 		if isSignInRedirect(aloc) {
 			return fmt.Errorf("sso_rejected approve→sign-in")
 		}
@@ -528,7 +536,6 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			c.ClearRateLimit()
 			return nil
 		}
-		c.logDiag("confirm_approve status=%d loc=%q bodyLen=%d attempt=%d", resp2.StatusCode, trimLoc(aloc), len(body), attempt)
 		if isRedirect(resp2.StatusCode) && aloc != "" {
 			next := absURL("https://auth.x.ai", aloc)
 			if !strings.Contains(next, "auth.x.ai") && !strings.Contains(next, "accounts.x.ai") {
