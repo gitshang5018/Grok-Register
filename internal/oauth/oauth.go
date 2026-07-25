@@ -7,14 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	http "github.com/bogdanfinn/fhttp"
+	tls_client "github.com/bogdanfinn/tls-client"
+	"github.com/bogdanfinn/tls-client/profiles"
 
 	"github.com/grok-free-register/grok-reg/internal/clearance"
 )
@@ -54,7 +56,7 @@ type Credential struct {
 }
 
 type Client struct {
-	http  *http.Client
+	http  tls_client.HttpClient
 	ua    string
 	clear *clearance.Manager
 
@@ -78,34 +80,37 @@ type Client struct {
 }
 
 func NewClient(proxy string, cm *clearance.Manager, baseCooldown time.Duration) (*Client, error) {
-	jar, _ := cookiejar.New(nil)
-	tr := &http.Transport{}
-	if proxy != "" {
-		u, err := url.Parse(proxy)
-		if err != nil {
-			return nil, err
-		}
-		tr.Proxy = http.ProxyURL(u)
-	}
 	if baseCooldown <= 0 {
 		baseCooldown = 60 * time.Second
 	}
+	// Match registration leg: Chrome TLS fingerprint. Plain net/http was getting
+	// fake /device/done redirects while token poll still returned invalid_grant.
+	// No cookie jar: we manage the SSO session Cookie header explicitly so jar
+	// auto-attach cannot duplicate / poison cookies across auth.x.ai hosts.
+	opts := []tls_client.HttpClientOption{
+		tls_client.WithTimeoutSeconds(45),
+		tls_client.WithClientProfile(profiles.Chrome_131),
+		tls_client.WithRandomTLSExtensionOrder(),
+		tls_client.WithNotFollowRedirects(),
+	}
+	if strings.TrimSpace(proxy) != "" {
+		opts = append(opts, tls_client.WithProxyUrl(strings.TrimSpace(proxy)))
+	}
+	cli, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), opts...)
+	if err != nil {
+		return nil, err
+	}
 	c := &Client{
-		http: &http.Client{
-			Timeout:   45 * time.Second,
-			Jar:       jar,
-			Transport: tr,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		http:     cli,
 		ua:       DefaultUA,
 		clear:    cm,
 		baseCool: baseCooldown,
 		cooldown: baseCooldown,
 	}
 	if cm != nil {
-		c.ua = cm.UserAgent()
+		if ua := cm.UserAgent(); ua != "" {
+			c.ua = ua
+		}
 	}
 	return c, nil
 }
@@ -512,7 +517,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		approveTarget = ApproveURL
 	}
 
-	c.logDiag("confirm_approve form keys: %d (principal_id=%t pid=%s)", len(aform), aform.Get("principal_id") != "", trimLoc(aform.Get("principal_id")))
+	c.logDiag("confirm_approve form keys: %d (principal_id=%t pid=%s) cookies=%s", len(aform), aform.Get("principal_id") != "", trimLoc(aform.Get("principal_id")), cookieNames(cookie))
 
 	fallbackForm := url.Values{
 		"user_code":      {flow.UserCode},
@@ -649,6 +654,28 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		return fmt.Errorf("unknown_page status=%d loc=%q body=%q", resp2.StatusCode, aloc, preview)
 	}
 	return fmt.Errorf("device_approve_failed")
+}
+
+
+func cookieNames(cookie string) string {
+	if strings.TrimSpace(cookie) == "" {
+		return "-"
+	}
+	var names []string
+	for _, part := range strings.Split(cookie, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name := strings.SplitN(part, "=", 2)[0]
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "-"
+	}
+	return strings.Join(names, ",")
 }
 
 func mergeSetCookies(cookie string, h http.Header) string {
@@ -886,6 +913,12 @@ func (c *Client) PollToken(ctx context.Context, flow DeviceFlow) (Credential, er
 	interval := time.Duration(flow.Interval * float64(time.Second))
 	if interval < time.Second {
 		interval = 5 * time.Second
+	}
+	// Give auth.x.ai a beat to persist the device grant after /device/done.
+	select {
+	case <-ctx.Done():
+		return Credential{}, ctx.Err()
+	case <-time.After(1500 * time.Millisecond):
 	}
 	for time.Now().Before(deadline) {
 		form := url.Values{}
