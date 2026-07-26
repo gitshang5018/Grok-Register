@@ -74,6 +74,11 @@ type Engine struct {
 	oaN      atomic.Int64
 	fail     atomic.Int64
 
+	// Consecutive OAuth refusals. Only tryComplete() advances `done`, so when every
+	// account is refused a token the target loop never finishes and the batch keeps
+	// consuming mailboxes, Turnstile solves and Castle mints forever.
+	oauthConsecFail atomic.Int64
+
 	// Global OAuth pacing (shared by all oauth workers) — avoids dual-worker rate_limited.
 	oauthGateMu    sync.Mutex
 	oauthLastStart time.Time
@@ -535,10 +540,17 @@ func (e *Engine) run(ctx context.Context) error {
 		go e.oauthWorker(ctx, i)
 	}
 
-	// wait until target or cancel
+	// wait until target, give-up threshold, or cancel
 	for {
 		if int(e.done.Load()) >= e.opt.Target {
 			log.OKf("已达目标 %d，停止", e.opt.Target)
+			cancel()
+			break
+		}
+		if limit := e.opt.Cfg.OAuthGiveUpAfter; limit > 0 && e.oauthConsecFail.Load() >= int64(limit) {
+			log.Errf("连续 %d 个账号 OAuth 被拒，停止本批次以免继续消耗邮箱与 Turnstile 额度。"+
+				"已注册账号的 SSO token 已写入 %s，不受影响。"+
+				"设 OAUTH_GIVE_UP_AFTER=0 可关闭此保护。", limit, e.opt.Run.SSO)
 			cancel()
 			break
 		}
@@ -963,9 +975,11 @@ func (e *Engine) oauthWorker(ctx context.Context, id int) {
 		if err != nil {
 			log.Warnf("OAuth fail %s: %v (%.1fs) sso=%s", job.Email, err, time.Since(t0).Seconds(), ssoPrev)
 			e.fail.Add(1)
+			e.oauthConsecFail.Add(1)
 			e.releaseReserve()
 			continue
 		}
+		e.oauthConsecFail.Store(0)
 		log.Infof("OAuth ok %s (%.1fs)", job.Email, time.Since(t0).Seconds())
 		e.oaN.Add(1)
 		doc := cpa.FromCredential(cred, job.Email)

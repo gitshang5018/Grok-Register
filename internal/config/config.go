@@ -70,6 +70,7 @@ type Config struct {
 	OAuthMinIntervalSec float64 // global spacing between OAuth starts (all workers)
 	OAuthRetrySec       float64 // rate-limit cooldown base
 	OAuthWorkers        int     // concurrent OAuth workers (1–4); 0 = auto
+	OAuthGiveUpAfter    int     // stop the batch after N consecutive OAuth refusals; 0 = never
 	ProbeEnabled        bool
 	ProbeWarmupSec      float64 // sleep before first probe (default 5)
 
@@ -128,6 +129,7 @@ func Defaults() Config {
 		OAuthMinIntervalSec:   6, // stable: lower 4 easily hits device 429
 		OAuthRetrySec:         60,
 		OAuthWorkers:          0, // auto: 1 when thread≥3 or large target
+		OAuthGiveUpAfter:      10,
 		ProbeEnabled:          true,
 		ProbeWarmupSec:        5, // stable: new tokens often 403 under 1.5–3s
 		CastleEnabled:         true,
@@ -276,6 +278,7 @@ func Save(path string, cfg Config) error {
 	b.WriteString(fmt.Sprintf("OAUTH_MIN_INTERVAL_SEC=%g\n", cfg.OAuthMinIntervalSec))
 	b.WriteString(fmt.Sprintf("OAUTH_RETRY_SEC=%g\n", cfg.OAuthRetrySec))
 	b.WriteString(fmt.Sprintf("OAUTH_WORKERS=%d\n", cfg.OAuthWorkers))
+	b.WriteString(fmt.Sprintf("OAUTH_GIVE_UP_AFTER=%d\n", cfg.OAuthGiveUpAfter))
 	b.WriteString(fmt.Sprintf("PHYSICAL_CAP=%d\n", cfg.PhysicalCap))
 	b.WriteString(fmt.Sprintf("CPA_UPLOAD_ENABLED=%s\n", bool01(cfg.CPAUploadEnabled)))
 	b.WriteString(fmt.Sprintf("CPA_MANAGEMENT_BASE=%s\n", cfg.CPAManagementBase))
@@ -555,6 +558,11 @@ func applyMap(cfg *Config, env map[string]string) {
 	if v, ok := env["OAUTH_WORKERS"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.OAuthWorkers = n
+		}
+	}
+	if v, ok := env["OAUTH_GIVE_UP_AFTER"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.OAuthGiveUpAfter = n
 		}
 	}
 	if v, ok := env["PHYSICAL_CAP"]; ok {
