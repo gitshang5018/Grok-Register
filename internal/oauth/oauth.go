@@ -61,14 +61,12 @@ type Client struct {
 	clear *clearance.Manager
 
 	// rate limit gate
-	mu         sync.Mutex
-	trippedAt  time.Time
-	nextProbe  time.Time
-	cooldown   time.Duration
-	baseCool   time.Duration
-	trips      int
-	probeToken int
-	probeSeq   int
+	mu        sync.Mutex
+	trippedAt time.Time
+	nextProbe time.Time
+	cooldown  time.Duration
+	baseCool  time.Duration
+	trips     int
 
 	discMu   sync.Mutex
 	deviceEP string
@@ -163,9 +161,10 @@ func (c *Client) WaitRateLimit(ctx context.Context) error {
 				continue
 			}
 		}
-		// allow one probe
-		c.probeSeq++
-		c.probeToken = c.probeSeq
+		// Allow one probe, then re-arm the gate. Without re-arming, the window stays
+		// open forever once nextProbe passes, so every worker probes simultaneously
+		// and immediately re-trips the limiter.
+		c.nextProbe = now.Add(c.cooldown)
 		c.mu.Unlock()
 		return nil
 	}
@@ -347,6 +346,10 @@ func principalFromSSO(sso string) string {
 	return ""
 }
 
+// isDeviceDone reports whether a redirect target is the device-grant completion page.
+// It deliberately rejects /account and /console*: auth.x.ai redirects there on a failed
+// approve too, and accepting them made ConfirmHTTP report grants that were never
+// recorded, which surfaced later as invalid_grant from the token poll.
 func isDeviceDone(loc string) bool {
 	if loc == "" {
 		return false
@@ -355,11 +358,23 @@ func isDeviceDone(loc string) bool {
 	if err != nil {
 		return strings.Contains(loc, "/oauth2/device/done")
 	}
+	if q := u.Query(); q.Get("error") != "" || q.Get("policy") == "deny" {
+		return false
+	}
 	p := u.Path
-	return strings.Contains(p, "/oauth2/device/done") || 
-	       strings.HasSuffix(p, "/device/done") || 
-	       p == "/account" || 
-	       strings.HasPrefix(p, "/console")
+	return strings.Contains(p, "/oauth2/device/done") || strings.HasSuffix(p, "/device/done")
+}
+
+// isAccountLanding reports the generic signed-in landing pages. auth.x.ai bounces there
+// after a REJECTED approve as well, so landing here proves the session is alive but says
+// nothing about whether the device grant was recorded.
+func isAccountLanding(loc string) bool {
+	u, err := url.Parse(loc)
+	if err != nil {
+		return false
+	}
+	p := u.Path
+	return p == "/account" || strings.HasPrefix(p, "/console")
 }
 
 func isSignInRedirect(loc string) bool {
@@ -387,10 +402,39 @@ func absURL(baseHost, loc string) string {
 	return loc
 }
 
+var scriptBlockRe = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+
+// visibleText drops inline <script> blocks before any text matching. accounts.x.ai is a
+// Next.js app that inlines its entire i18n message catalog into the RSC payload of every
+// server-rendered page, so the success string, the denial string and the error strings
+// all appear verbatim in the markup of the *pre-approval* consent page. Matching the raw
+// body made authorizedBody return true for every response, which turned each rejected
+// approve into a false success and left the real error invisible.
+func visibleText(body string) string {
+	return scriptBlockRe.ReplaceAllString(body, " ")
+}
+
+func deniedText(visible string) bool {
+	low := strings.ToLower(visible)
+	return strings.Contains(low, "authorization denied") ||
+		strings.Contains(low, "authorization was denied") ||
+		strings.Contains(visible, "授权已拒绝") ||
+		strings.Contains(visible, "已拒绝授权")
+}
+
+// deniedBody reports an explicit denial rendered in the page body.
+func deniedBody(body string) bool {
+	return deniedText(visibleText(body))
+}
+
 func authorizedBody(body string) bool {
-	low := strings.ToLower(body)
+	visible := visibleText(body)
+	if deniedText(visible) {
+		return false
+	}
+	low := strings.ToLower(visible)
 	return strings.Contains(low, "device authorized") ||
-		strings.Contains(body, "设备已授权") ||
+		strings.Contains(visible, "设备已授权") ||
 		strings.Contains(low, "you have authorized") ||
 		strings.Contains(low, "device is authorized")
 }
@@ -567,6 +611,12 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 		if isSignInRedirect(aloc) {
 			return fmt.Errorf("sso_rejected approve→sign-in")
 		}
+		if deniedBody(string(body)) {
+			return fmt.Errorf("consent_denied: accounts.x.ai rendered a denial for user_code=%s", flow.UserCode)
+		}
+		if isAccountLanding(aloc) {
+			c.logDiag("confirm_approve → account landing %q — session alive but grant NOT confirmed", trimLoc(aloc))
+		}
 		if (authorizedBody(string(body)) || isDeviceDone(aloc)) && resp2.StatusCode != 307 {
 			// Browser follows 303 See Other with GET — some grants only finalize then.
 			if isDeviceDone(aloc) {
@@ -578,7 +628,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 					c.logDiag("confirm_done GET err=%v", err)
 				}
 			}
-			c.logDiag("confirm_approve → authorized provisional (attempt=%d has_pid=%t)", attempt, form.Get("principal_id") != "")
+			c.logDiag("confirm_approve → authorized (attempt=%d has_pid=%t body_match=%t done_loc=%t)", attempt, form.Get("principal_id") != "", authorizedBody(string(body)), isDeviceDone(aloc))
 			c.ClearRateLimit()
 			return nil
 		}
@@ -611,12 +661,14 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 							c.ClearRateLimit()
 							return nil
 						}
-						// If it's a 302 to /account or something, just consider it success if the token endpoint accepts it
 						if isRedirect(resp3.StatusCode) {
 							next3 := absURL("https://accounts.x.ai", aloc3)
-							if isDeviceDone(next3) || strings.HasSuffix(next3, "/account") {
+							if isDeviceDone(next3) {
 								c.ClearRateLimit()
 								return nil
+							}
+							if isAccountLanding(next3) {
+								c.logDiag("confirm_approve 307→account landing %q — grant NOT confirmed", trimLoc(next3))
 							}
 						}
 					}
@@ -784,9 +836,16 @@ func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string)
 		return nil, cookie, ""
 	}
 	
-	// DEBUG: write html to file
-	_ = os.WriteFile("consent_debug.html", []byte(html), 0644)
-	
+	// The consent page carries the account userId, email and session state. Only spill it
+	// when explicitly asked, under a unique name so concurrent workers cannot clobber
+	// each other, and never world-readable.
+	if os.Getenv("GROK_OAUTH_DEBUG_HTML") == "1" {
+		name := fmt.Sprintf("consent_debug_%d.html", time.Now().UnixNano())
+		if werr := os.WriteFile(name, []byte(html), 0o600); werr != nil {
+			c.logDiag("consent debug dump failed: %v", werr)
+		}
+	}
+
 	fields, action := parseHTMLFormFields(html)
 	return fields, newCookie, action
 }
@@ -1117,8 +1176,36 @@ func truncateBody(b []byte, n int) string {
 	return s[:n]
 }
 
+// terminalOAuthErr reports failures a fresh device flow cannot fix. Everything else —
+// including transport, proxy and DNS errors — is worth another attempt. The previous
+// allowlist of "recoverable" substrings matched no transport error at all, so a single
+// dial failure against the clearance proxy permanently failed the account.
+func terminalOAuthErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "sso_rejected") ||
+		strings.Contains(s, "login_required") ||
+		strings.Contains(s, "sso_cookie_lost") ||
+		strings.Contains(s, "consent_denied") ||
+		strings.Contains(s, "policy=deny") ||
+		strings.Contains(s, "policy_deny") ||
+		strings.Contains(s, "oauth_denied")
+}
+
+// settle pauses between attempts, growing with the attempt index.
+func (c *Client) settle(ctx context.Context, attempt int) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(2*time.Second + time.Duration(attempt)*2*time.Second):
+		return nil
+	}
+}
+
 // Exchange is convenience: start flow + confirm HTTP + poll.
-// On rate_limited / device 429 / invalid_grant, retry with a fresh device code.
+// Any non-terminal failure retries with a fresh device code.
 func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 	c.clearDiags()
 	var last error
@@ -1129,22 +1216,22 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 		flow, err := c.StartDeviceFlow(ctx)
 		if err != nil {
 			last = err
-			if (errors.Is(err, ErrRateLimited) || strings.Contains(err.Error(), "status=429")) && attempt < 2 {
+			if attempt < 2 && !terminalOAuthErr(err) {
+				c.logDiag("device flow start failed (%v) -> retry attempt=%d", err, attempt+1)
+				if serr := c.settle(ctx, attempt); serr != nil {
+					return Credential{}, serr
+				}
 				continue
 			}
-			return Credential{}, err
+			return Credential{}, fmt.Errorf("%w [diag: %s]", err, c.getDiags())
 		}
 		if err := c.ConfirmHTTP(ctx, sso, flow); err != nil {
 			last = err
-			if errors.Is(err, ErrRateLimited) && attempt < 2 {
-				continue
-			}
-			// Recoverable confirm failures: new device code
-			if attempt < 2 && (strings.Contains(err.Error(), "challenge") ||
-				strings.Contains(err.Error(), "unknown_page") ||
-				strings.Contains(err.Error(), "device_verify") ||
-				strings.Contains(err.Error(), "consent_missing_principal_id") ||
-				strings.Contains(err.Error(), "device_approve")) {
+			if attempt < 2 && !terminalOAuthErr(err) {
+				c.logDiag("confirm failed (%v) -> new device flow attempt=%d", err, attempt+1)
+				if serr := c.settle(ctx, attempt); serr != nil {
+					return Credential{}, serr
+				}
 				continue
 			}
 			return Credential{}, fmt.Errorf("%w [diag: %s]", err, c.getDiags())
@@ -1155,12 +1242,9 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 			// invalid_grant: device grant did not stick. Do NOT re-approve the same
 			// device_code (already spent -> invalid_code). Open a fresh device flow.
 			if attempt < 2 && strings.Contains(err.Error(), "invalid_grant") {
-				settle := 2*time.Second + time.Duration(attempt)*2*time.Second
-				c.logDiag("invalid_grant -> new device flow attempt=%d settle=%s", attempt, settle)
-				select {
-				case <-ctx.Done():
-					return Credential{}, ctx.Err()
-				case <-time.After(settle):
+				c.logDiag("invalid_grant -> new device flow attempt=%d", attempt+1)
+				if serr := c.settle(ctx, attempt); serr != nil {
+					return Credential{}, serr
 				}
 				continue
 			}
@@ -1171,7 +1255,7 @@ func (c *Client) Exchange(ctx context.Context, sso string) (Credential, error) {
 	if last == nil {
 		last = fmt.Errorf("oauth_failed")
 	}
-	return Credential{}, last
+	return Credential{}, fmt.Errorf("%w [diag: %s]", last, c.getDiags())
 }
 
 // Refresh re-issues access token using existing refresh_token.
