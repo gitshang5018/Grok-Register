@@ -1063,12 +1063,23 @@ func (c *Client) PollToken(ctx context.Context, flow DeviceFlow) (Credential, er
 		case "expired_token":
 			return Credential{}, fmt.Errorf("oauth_expired")
 		case "invalid_grant":
-			// Device not actually authorized (confirm incomplete / denied / SSO mismatch).
+			// Only reachable after ConfirmHTTP proved the approve POST was accepted and
+			// redirected to the real /oauth2/device/done, so the device grant itself is
+			// not in question here.
+			//
+			// "Access denied" at this point means auth.x.ai refuses to mint a token for
+			// the ACCOUNT. Accounts created by protocol replay — without a real browser
+			// device fingerprint at signup — are refused permanently: they log in fine
+			// and pass consent, but never receive an OAuth token. No change to the device
+			// flow recovers them; the account has to be registered through a browser.
 			c.logDiag("poll invalid_grant desc=%q body=%s", errDesc, truncateBody(body, 160))
-			if errDesc != "" {
-				return Credential{}, fmt.Errorf("oauth_rejected: invalid_grant (%s) — device not authorized on auth.x.ai", errDesc)
+			if strings.EqualFold(strings.TrimSpace(errDesc), "access denied") {
+				return Credential{}, fmt.Errorf("oauth_rejected: invalid_grant (%s) — approve was accepted, so this is an account-level refusal: the account is most likely not OAuth-eligible (registered without a browser device fingerprint)", errDesc)
 			}
-			return Credential{}, fmt.Errorf("oauth_rejected: invalid_grant — device not authorized on auth.x.ai")
+			if errDesc != "" {
+				return Credential{}, fmt.Errorf("oauth_rejected: invalid_grant (%s) — approve was accepted but the grant was not redeemable", errDesc)
+			}
+			return Credential{}, fmt.Errorf("oauth_rejected: invalid_grant — approve was accepted but the grant was not redeemable")
 		default:
 			if errCode != "" {
 				if errDesc != "" {
