@@ -53,16 +53,16 @@ type Options struct {
 type Engine struct {
 	opt Options
 
-	cm              *clearance.Manager
-	xai             *protocol.Client
-	mail            *email.Provider
-	turn            turnstile.Provider
-	castle          castle.Minter
-	castlePK        string
-	oauth           *oauth.Client
-	inv             *inventory.Inventory[string, QItem]
-	phys            *inventory.Semaphore
-	qPending        *inventory.Semaphore
+	cm       *clearance.Manager
+	xai      *protocol.Client
+	mail     *email.Provider
+	turn     turnstile.Provider
+	castle   castle.Minter
+	castlePK string
+	oauth    *oauth.Client
+	inv      *inventory.Inventory[string, QItem]
+	phys     *inventory.Semaphore
+	qPending *inventory.Semaphore
 
 	oauthCh         chan SSOJob
 	uploader        *cpa.Uploader
@@ -86,12 +86,12 @@ type Engine struct {
 	oauthGateMu    sync.Mutex
 	oauthLastStart time.Time
 
-	start       time.Time
-	wgReg       sync.WaitGroup // S/P/C
-	wgOAuth     sync.WaitGroup
-	wgAux       sync.WaitGroup // status ticker etc
-	wgUpload    sync.WaitGroup // async CPA management uploads
-	wgSub2API   sync.WaitGroup // async SUB2API imports
+	start     time.Time
+	wgReg     sync.WaitGroup // S/P/C
+	wgOAuth   sync.WaitGroup
+	wgAux     sync.WaitGroup // status ticker etc
+	wgUpload  sync.WaitGroup // async CPA management uploads
+	wgSub2API sync.WaitGroup // async SUB2API imports
 }
 
 // remainingCapacity = target - done - reserved (how many new accounts may start).
@@ -400,6 +400,7 @@ func (e *Engine) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.oauth.ConfigureConsent(cfg.OAuthConsentMode, cfg.OAuthConsentTimeoutSec, cfg.OAuthConsentConcurrency)
 
 	_ = st.Set(func(s *state.Snapshot) {
 		s.Phase = state.PhaseRegister
@@ -469,6 +470,7 @@ func (e *Engine) run(ctx context.Context) error {
 	// Rebuild oauth client after clearance manager may have been attached.
 	if e.cm != nil {
 		if oc, oerr := oauth.NewClient(cfg.RegisterProxy, e.cm, time.Duration(cfg.OAuthRetrySec)*time.Second); oerr == nil {
+			oc.ConfigureConsent(cfg.OAuthConsentMode, cfg.OAuthConsentTimeoutSec, cfg.OAuthConsentConcurrency)
 			e.oauth = oc
 		}
 	}

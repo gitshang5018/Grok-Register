@@ -59,6 +59,7 @@ type Credential struct {
 type Client struct {
 	http  tls_client.HttpClient
 	ua    string
+	proxy string
 	clear *clearance.Manager
 
 	// rate limit gate
@@ -76,6 +77,15 @@ type Client struct {
 
 	diagMu sync.Mutex
 	diags  []string
+
+	// PKCE consent strategy (HTTP Server Action vs browser)
+	consentMode        string
+	consentTimeout     time.Duration
+	consentConcurrency int
+	consentSem         chan struct{}
+	consentMu          sync.Mutex
+	// optional override for tests
+	consentRunner func(ctx context.Context, consentURL, cookie string, timeout time.Duration) (callbackURL string, err error)
 }
 
 func NewClient(proxy string, cm *clearance.Manager, baseCooldown time.Duration) (*Client, error) {
@@ -102,6 +112,7 @@ func NewClient(proxy string, cm *clearance.Manager, baseCooldown time.Duration) 
 	c := &Client{
 		http:     cli,
 		ua:       DefaultUA,
+		proxy:    strings.TrimSpace(proxy),
 		clear:    cm,
 		baseCool: baseCooldown,
 		cooldown: baseCooldown,
@@ -607,7 +618,7 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 						_ = resp3.Body.Close()
 						cookie = mergeSetCookies(cookie, resp3.Header)
 						c.logDiag("confirm_approve follow 307 status=%d loc=%q bodyLen=%d", resp3.StatusCode, trimLoc(aloc3), len(body3))
-						
+
 						// Next location might be the real done page or just a 200/302
 						if authorizedBody(string(body3)) || isDeviceDone(aloc3) {
 							c.ClearRateLimit()
@@ -676,7 +687,6 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	}
 	return fmt.Errorf("device_approve_failed")
 }
-
 
 func cookieNames(cookie string) string {
 	if strings.TrimSpace(cookie) == "" {
@@ -820,7 +830,7 @@ func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string)
 	if err != nil || st >= 400 {
 		return nil, cookie, ""
 	}
-	
+
 	// The consent page carries the account userId, email and session state. Only spill it
 	// when explicitly asked, under a unique name so concurrent workers cannot clobber
 	// each other, and never world-readable.
@@ -1035,7 +1045,7 @@ func parseInputFields(html string) url.Values {
 func parseHTMLFormFields(html string) (url.Values, string) {
 	out := url.Values{}
 	action := ""
-	
+
 	lowHTML := strings.ToLower(html)
 	if formIdx := strings.Index(lowHTML, "<form"); formIdx >= 0 {
 		if end := strings.Index(html[formIdx:], ">"); end >= 0 {

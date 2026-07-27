@@ -679,6 +679,8 @@ grep -q '^CLEARANCE_AUTO_STOP=' "$CFG" 2>/dev/null || echo 'CLEARANCE_AUTO_STOP=
 
 默认节奏（新装/代码 Defaults）：`OAUTH_MIN_INTERVAL_SEC=6`、`PROBE_WARMUP_SEC=5`、`OAUTH_RETRY_SEC=60`；交互线程回车=**2**。仍 429 可再把间隔调到 8。
 
+PKCE consent：`OAUTH_CONSENT_MODE=auto|browser|http`（默认 `auto`：HTTP Server Action 快失败后走 Playwright 浏览器点 Allow）。超时 `OAUTH_CONSENT_TIMEOUT_SEC=60`，浏览器并发 `OAUTH_CONSENT_CONCURRENCY=1`。脚本：`scripts/oauth_consent.py`（安装后由 `GROK_OAUTH_CONSENT_SCRIPT` 指向）。
+
 ---
 
 ## 开发

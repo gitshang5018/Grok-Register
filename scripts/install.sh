@@ -692,8 +692,9 @@ build_and_install_cli() {
   install -m 755 "bin/${COMMAND_NAME}" "${BIN_DIR}/${COMMAND_NAME}"
   install -m 755 scripts/turnstile_mint.py "${SHARE_DIR}/turnstile_mint.py"
   install -m 755 scripts/turnstile_pool.py "${SHARE_DIR}/turnstile_pool.py"
+  install -m 755 scripts/oauth_consent.py "${SHARE_DIR}/oauth_consent.py"
   ok "已安装 ${BIN_DIR}/${COMMAND_NAME}"
-  ok "已安装 mint 脚本 → $SHARE_DIR"
+  ok "已安装 mint/consent 脚本 → $SHARE_DIR"
 }
 
 install_browser() {
@@ -803,6 +804,7 @@ print_done() {
   export GROK_HOME="$GROK_HOME_OPT"
   export GROK_PYTHON="${VENV_DIR}/bin/python"
   export GROK_TURNSTILE_SCRIPT="${SHARE_DIR}/turnstile_mint.py"
+  export GROK_OAUTH_CONSENT_SCRIPT="${SHARE_DIR}/oauth_consent.py"
   export GROK_TURNSTILE_POOL_SCRIPT="${SHARE_DIR}/turnstile_pool.py"
   export CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 
@@ -1032,6 +1034,7 @@ export PATH="\$PATH:/usr/local/go/bin:${BIN_DIR}"
 export GROK_HOME="${GROK_HOME_OPT}"
 export GROK_PYTHON="${VENV_DIR}/bin/python"
 export GROK_TURNSTILE_SCRIPT="${SHARE_DIR}/turnstile_mint.py"
+  export GROK_OAUTH_CONSENT_SCRIPT="${SHARE_DIR}/oauth_consent.py"
 export GROK_TURNSTILE_POOL_SCRIPT="${SHARE_DIR}/turnstile_pool.py"
 export CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 EOF
@@ -1049,6 +1052,7 @@ EOF
           echo "export GROK_HOME=\"${GROK_HOME_OPT}\""
           echo "export GROK_PYTHON=\"${VENV_DIR}/bin/python\""
           echo "export GROK_TURNSTILE_SCRIPT=\"${SHARE_DIR}/turnstile_mint.py\""
+            echo "export GROK_OAUTH_CONSENT_SCRIPT=\"${SHARE_DIR}/oauth_consent.py\""
           echo "export GROK_TURNSTILE_POOL_SCRIPT=\"${SHARE_DIR}/turnstile_pool.py\""
           echo "export CLOAKBROWSER_SUPPRESS_FONT_WARNING=1"
           echo "export PATH=\"\$PATH:${BIN_DIR}\""
@@ -1064,6 +1068,7 @@ EOF
       echo "export GROK_HOME=\"${GROK_HOME_OPT}\""
       echo "export GROK_PYTHON=\"${VENV_DIR}/bin/python\""
       echo "export GROK_TURNSTILE_SCRIPT=\"${SHARE_DIR}/turnstile_mint.py\""
+        echo "export GROK_OAUTH_CONSENT_SCRIPT=\"${SHARE_DIR}/oauth_consent.py\""
       echo "export GROK_TURNSTILE_POOL_SCRIPT=\"${SHARE_DIR}/turnstile_pool.py\""
       echo "export CLOAKBROWSER_SUPPRESS_FONT_WARNING=1"
     } >>/root/.bashrc
@@ -1180,6 +1185,7 @@ export PATH="\$PATH:${BIN_DIR}"
 export GROK_HOME="${GROK_HOME_OPT}"
 export GROK_PYTHON="${VENV_DIR}/bin/python"
 export GROK_TURNSTILE_SCRIPT="${SHARE_DIR}/turnstile_mint.py"
+  export GROK_OAUTH_CONSENT_SCRIPT="${SHARE_DIR}/oauth_consent.py"
 export GROK_TURNSTILE_POOL_SCRIPT="${SHARE_DIR}/turnstile_pool.py"
 export CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 EOF

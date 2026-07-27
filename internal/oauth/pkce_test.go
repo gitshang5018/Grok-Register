@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPKCESessionChallengeIsS256OfVerifier(t *testing.T) {
@@ -414,5 +415,32 @@ func TestResolveURL(t *testing.T) {
 	want := "https://accounts.x.ai/_next/static/chunks/073qnqzc81yfr.js"
 	if got != want {
 		t.Fatalf("resolveURL = %q, want %q", got, want)
+	}
+}
+
+func TestSubmitConsentBrowserModeUsesRunner(t *testing.T) {
+	html := `<html><body><form action="https://auth.x.ai/oauth2/authorize">
+<input name="client_id" value="cid"/>
+<input name="state" value="st"/>
+<input name="redirect_uri" value="http://127.0.0.1:56121/callback"/>
+<input name="scope" value="openid"/>
+<input name="code_challenge" value="ch"/>
+<input name="code_challenge_method" value="S256"/>
+<input name="nonce" value="n"/>
+<input name="principal_type" value="User"/>
+<input name="principal_id" value=""/>
+<button type="button">Allow</button>
+</form></body></html>`
+	c := &Client{consentMode: "browser"}
+	c.consentRunner = func(ctx context.Context, consentURL, cookie string, timeout time.Duration) (string, error) {
+		return "http://127.0.0.1:56121/callback?code=from-browser&state=st", nil
+	}
+	loc, _, err := c.submitConsent(context.Background(),
+		"https://accounts.x.ai/oauth2/consent?state=st", html, "sso=tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(loc, "code=from-browser") {
+		t.Fatalf("loc=%s", loc)
 	}
 }

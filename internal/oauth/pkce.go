@@ -270,6 +270,7 @@ func (c *Client) authorizeCode(ctx context.Context, sso string, sess pkceSession
 // submitConsent posts the authorize-flow consent form, reusing the same field
 // scraping the device flow uses. Returns the response Location and cookie jar.
 func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie string) (string, string, error) {
+	mode := c.getConsentMode()
 	if os.Getenv("GROK_OAUTH_DEBUG_HTML") == "1" {
 		name := fmt.Sprintf("pkce_consent_%d.html", time.Now().UnixNano())
 		if werr := os.WriteFile(name, []byte(html), 0o600); werr != nil {
@@ -286,10 +287,43 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	c.logDiag("pkce_consent_forms %s", describeForms(forms))
 	c.logDiag("pkce_consent_cookies sent=%s dropped=%s", cookieNames(sanitizeSessionCookies(cookie)), droppedCookieNames(cookie))
 	target, ok := approvalForm(forms)
+
+	wantState := ""
+	if ok {
+		if vs, has := target.Fields["state"]; has && len(vs) > 0 {
+			wantState = vs[0]
+		}
+	}
+	if wantState == "" {
+		if u, err := url.Parse(consentURL); err == nil {
+			wantState = u.Query().Get("state")
+		}
+	}
+
+	// browser mode: skip SA/form POST and drive consent in a real browser.
+	if !shouldTryHTTPConsent(mode) {
+		if !shouldAllowBrowserConsent(mode) {
+			return "", cookie, fmt.Errorf("pkce_consent: mode=%s forbids browser and HTTP", mode)
+		}
+		loc, err := c.browserConsent(ctx, consentURL, sanitizeSessionCookies(cookie), wantState)
+		if err != nil {
+			return "", cookie, err
+		}
+		return loc, cookie, nil
+	}
+
 	if !ok {
+		if shouldAllowBrowserConsent(mode) {
+			c.logDiag("pkce_consent: no approval form -> browser (mode=%s)", mode)
+			loc, err := c.browserConsent(ctx, consentURL, sanitizeSessionCookies(cookie), wantState)
+			if err != nil {
+				return "", cookie, fmt.Errorf("pkce_consent_no_approval_form and browser failed: %w forms=[%s]", err, describeForms(forms))
+			}
+			return loc, cookie, nil
+		}
 		return "", cookie, fmt.Errorf("pkce_consent_no_approval_form forms=[%s]", describeForms(forms))
 	}
-	if target.Action == "" {
+	if target.Action == "" && !shouldAllowBrowserConsent(mode) {
 		return "", cookie, fmt.Errorf("pkce_consent_form_missing_action")
 	}
 
@@ -328,10 +362,26 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 
 	// Next.js App Router / RSC Server Action consent path (accounts.x.ai modern consent).
 	// Try Server Action submitOAuth2Consent first.
-	if saLoc, saCookie, ok := submitServerActionConsent(ctx, c, consentURL, html, cookie, form); ok {
+	saLoc, saCookie, saOK, browserHint := submitServerActionConsent(ctx, c, consentURL, html, cookie, form)
+	if saOK {
 		c.logDiag("pkce_consent Server Action succeeded: loc=%q", trimLoc(saLoc))
 		return saLoc, saCookie, nil
 	}
+	if saCookie != "" {
+		cookie = saCookie
+	}
+
+	// auto/browser: after SA miss use browser. Form POST only for http mode —
+	// Allow is type=button so POST rarely works.
+	if shouldAllowBrowserConsent(mode) {
+		c.logDiag("pkce_consent HTTP SA exhausted -> browser (mode=%s hint=%v)", mode, browserHint)
+		loc, err := c.browserConsent(ctx, consentURL, sanitizeSessionCookies(cookie), wantState)
+		if err != nil {
+			return "", cookie, err
+		}
+		return loc, cookie, nil
+	}
+
 	c.logDiag("pkce_consent Server Action did not yield code -> fallback to form POST")
 
 	action := target.Action
@@ -342,6 +392,9 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 			c.logDiag("pkce_consent using button formaction %q", trimLoc(action))
 			break
 		}
+	}
+	if action == "" {
+		return "", cookie, fmt.Errorf("pkce_consent_form_missing_action")
 	}
 	postTarget := absURL(consentURL, action)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, postTarget, strings.NewReader(form.Encode()))
@@ -371,7 +424,6 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	}
 	return loc, cookie, nil
 }
-
 type rscConsentPayload struct {
 	Action              string `json:"action"`
 	ClientID            string `json:"clientId"`
@@ -996,11 +1048,11 @@ func bodyTailPreview(s string, n int) string {
 	return s
 }
 
-func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html, cookie string, form url.Values) (string, string, bool) {
+func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html, cookie string, form url.Values) (string, string, bool, bool) {
 	actionIDs := discoverConsentActionIDs(ctx, c, consentURL, html)
 	c.logDiag("pkce_consent discovered %d server action IDs: %v", len(actionIDs), actionIDs)
 	if len(actionIDs) == 0 {
-		return "", cookie, false
+		return "", cookie, false, false
 	}
 
 	submitURL := serverActionSubmitURL(consentURL)
@@ -1065,7 +1117,7 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 				bodyPreview(actionResult, 160), bodyTailPreview(bodyStr, 160))
 
 			if strings.Contains(loc, "code=") {
-				return loc, cookie, true
+				return loc, cookie, true, false
 			}
 			if isCallback(loc) {
 				c.logDiag("pkce server action %s body#%d(%s) callback without code: %q", tag, bi, ab.label, trimLoc(loc))
@@ -1074,7 +1126,12 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 
 			if synth := extractCodeFromActionBody(bodyStr, form.Get("redirect_uri"), form.Get("state")); synth != "" {
 				c.logDiag("pkce server action %s body#%d(%s) extracted code from body", tag, bi, ab.label)
-				return synth, cookie, true
+				return synth, cookie, true, false
+			}
+
+			if serverActionIndicatesBrowserFallback(actionResult) || serverActionIndicatesBrowserFallback(bodyStr) {
+				c.logDiag("pkce server action %s body#%d(%s) business error -> browser hint", tag, bi, ab.label)
+				return "", cookie, false, true
 			}
 
 			if resp.StatusCode == 404 ||
@@ -1084,7 +1141,7 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 			}
 		}
 	}
-	return "", cookie, false
+	return "", cookie, false, false
 }
 
 // exchangeCode redeems the authorization code. Per RFC 6749 this call carries no

@@ -56,6 +56,10 @@ type Options struct {
 	Uploader        *cpa.Uploader
 	Sub2APIUploader *sub2api.Uploader
 	Grant           string // pkce | device | auto; empty = pkce
+	// PKCE consent: auto | browser | http (empty = auto)
+	ConsentMode        string
+	ConsentTimeoutSec  int
+	ConsentConcurrency int
 }
 
 // grantName normalizes Options.Grant for logging and result reporting.
@@ -497,6 +501,7 @@ func Run(ctx context.Context, accs []Account, opt Options) ([]Result, error) {
 			logf(opt, "oauth client: %v", err)
 			return
 		}
+		cli.ConfigureConsent(opt.ConsentMode, opt.ConsentTimeoutSec, opt.ConsentConcurrency)
 		for j := range jobs {
 			select {
 			case <-ctx.Done():
