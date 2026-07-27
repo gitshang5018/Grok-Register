@@ -312,3 +312,22 @@ func TestClearRateLimitResets(t *testing.T) {
 		t.Fatalf("rate limit not reset: trippedAt=%v trips=%d cooldown=%v", c.trippedAt, c.trips, c.cooldown)
 	}
 }
+
+func TestPKCEConsentSingleFormDenyAllowSelectsForm(t *testing.T) {
+	html := `<form action="https://auth.x.ai/oauth2/authorize" method="POST">` +
+		`<input type="hidden" name="client_id" value="b1a00492-073a-47ea-816f-4c329264a828">` +
+		`<input type="hidden" name="principal_id" value="">` +
+		`<button type="button">Deny</button><button type="button">Allow</button></form>`
+
+	forms := parseForms(html)
+	if len(forms) != 1 {
+		t.Fatalf("parsed %d forms, want 1", len(forms))
+	}
+	f, ok := approvalForm(forms)
+	if !ok {
+		t.Fatal("approvalForm should select the single form holding Allow")
+	}
+	if f.Action != "https://auth.x.ai/oauth2/authorize" {
+		t.Fatalf("action = %q", f.Action)
+	}
+}

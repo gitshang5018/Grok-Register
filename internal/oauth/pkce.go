@@ -302,11 +302,9 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 		}
 		form.Set(k, v)
 	}
-	// Only when the form defines it — the device consent shape puts allow and deny
-	// on one form and distinguishes them with this field.
-	if _, hasAction := target.Fields["action"]; hasAction {
-		form.Set("action", "allow")
-	}
+	// Always set action=allow to confirm approval. auth.x.ai requires action=allow
+	// when Allow and Deny share a form (or when validating consent action).
+	form.Set("action", "allow")
 	// A named approval button contributes its own pair when it has one.
 	for _, b := range target.Buttons {
 		if b.Name != "" && isApproveLabel(b) && !isDenyLabel(b) {
