@@ -993,9 +993,12 @@ func cmdReoauth(args []string) error {
 		OutLog: func(format string, args ...any) {
 			fmt.Printf(format+"\n", args...)
 		},
-		Uploader:        cpaUploader,
-		Sub2APIUploader: sub2apiUploader,
-		Grant:           cfg.OAuthGrant,
+		Uploader:           cpaUploader,
+		Sub2APIUploader:    sub2apiUploader,
+		Grant:              cfg.OAuthGrant,
+		ConsentMode:        cfg.OAuthConsentMode,
+		ConsentTimeoutSec:  cfg.OAuthConsentTimeoutSec,
+		ConsentConcurrency: cfg.OAuthConsentConcurrency,
 	}
 
 	_, err = reoauth.Run(ctx, accs, opts)
