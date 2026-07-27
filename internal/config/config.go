@@ -67,13 +67,16 @@ type Config struct {
 	TempmailLOLRetries    int
 	TempmailLOLIntervalMS int
 
-	OAuthMinIntervalSec float64 // global spacing between OAuth starts (all workers)
-	OAuthRetrySec       float64 // rate-limit cooldown base
-	OAuthWorkers        int     // concurrent OAuth workers (1–4); 0 = auto
-	OAuthGiveUpAfter    int     // stop the batch after N consecutive OAuth refusals; 0 = never
-	OAuthGrant          string  // pkce | device | auto
-	ProbeEnabled        bool
-	ProbeWarmupSec      float64 // sleep before first probe (default 5)
+	OAuthMinIntervalSec     float64 // global spacing between OAuth starts (all workers)
+	OAuthRetrySec           float64 // rate-limit cooldown base
+	OAuthWorkers            int     // concurrent OAuth workers (1–4); 0 = auto
+	OAuthGiveUpAfter        int     // stop the batch after N consecutive OAuth refusals; 0 = never
+	OAuthGrant              string  // pkce | device | auto
+	OAuthConsentMode        string  // auto | browser | http
+	OAuthConsentTimeoutSec  int     // default 60
+	OAuthConsentConcurrency int     // default 1
+	ProbeEnabled            bool
+	ProbeWarmupSec          float64 // sleep before first probe (default 5)
 
 	// Castle request tokens (required to avoid false_clean / no_token mark)
 	CastleEnabled bool   // default true: mint via browser SDK
@@ -105,53 +108,56 @@ type Config struct {
 
 func Defaults() Config {
 	return Config{
-		EmailMode:             EmailTempmail,
-		EmailAPI:              "http://127.0.0.1:8080",
-		TestmailDomain:        "inbox.testmail.app",
-		ClearanceEnabled:      true,
-		ClearanceMode:         "auto",
-		ClearanceAutoStop:     true,
-		RegisterProxy:         "http://127.0.0.1:40080",
-		FlareSolverrURL:       "http://127.0.0.1:8191",
-		ClearanceProxy:        "http://privoxy:8118",
-		ClearanceURLs:         "https://accounts.x.ai,https://x.ai,https://status.x.ai,https://console.x.ai,https://auth.x.ai",
-		CFImpersonate:         "chrome_131",
-		CFImpersonateFallback: "chrome_124,chrome_120",
-		Target:                0, // set by start CLI/prompt
-		PhysicalCap:           0,
-		TurnstileProvider:     "browser",
-		TurnstileMode:         "offscreen",
-		LiteSolverURL:         "http://127.0.0.1:5072",
-		TurnstileWorkers:      0, // set by start CLI/prompt
-		ProtocolHTTP:          true,
-		HTTPPoolSize:          8,
-		TempmailLOLRetries:    30,
-		TempmailLOLIntervalMS: 1500,
-		OAuthMinIntervalSec:   6, // stable: lower 4 easily hits device 429
-		OAuthRetrySec:         60,
-		OAuthWorkers:          0, // auto: 1 when thread≥3 or large target
-		OAuthGiveUpAfter:      10,
-		OAuthGrant:            "pkce",
-		ProbeEnabled:          true,
-		ProbeWarmupSec:        5, // stable: new tokens often 403 under 1.5–3s
-		CastleEnabled:         true,
-		CastlePK:              "",
-		CastleRequire:         true,
-		HTTPProxy:             "http://127.0.0.1:40080",
-		HTTPSProxy:            "http://127.0.0.1:40080",
-		NoProxy:               "127.0.0.1,localhost",
-		CPAUploadEnabled:      false,
-		CPAManagementBase:     "http://localhost:8317/v0/management",
-		CPAUploadTimeoutSec:   30,
-		CPAUploadRetries:      2,
-		CPAUploadNameTemplate: "{email}.json",
-		CPAUploadVerify:       true,
-		CPAUploadMode:         "multipart",
-		Sub2APIEnabled:        false,
-		Sub2APIBaseURL:        "http://127.0.0.1:8000",
-		Sub2APIPath:           "/api/v1/admin/accounts/import",
-		Sub2APITimeoutSec:     30,
-		Sub2APIRetries:        2,
+		EmailMode:               EmailTempmail,
+		EmailAPI:                "http://127.0.0.1:8080",
+		TestmailDomain:          "inbox.testmail.app",
+		ClearanceEnabled:        true,
+		ClearanceMode:           "auto",
+		ClearanceAutoStop:       true,
+		RegisterProxy:           "http://127.0.0.1:40080",
+		FlareSolverrURL:         "http://127.0.0.1:8191",
+		ClearanceProxy:          "http://privoxy:8118",
+		ClearanceURLs:           "https://accounts.x.ai,https://x.ai,https://status.x.ai,https://console.x.ai,https://auth.x.ai",
+		CFImpersonate:           "chrome_131",
+		CFImpersonateFallback:   "chrome_124,chrome_120",
+		Target:                  0, // set by start CLI/prompt
+		PhysicalCap:             0,
+		TurnstileProvider:       "browser",
+		TurnstileMode:           "offscreen",
+		LiteSolverURL:           "http://127.0.0.1:5072",
+		TurnstileWorkers:        0, // set by start CLI/prompt
+		ProtocolHTTP:            true,
+		HTTPPoolSize:            8,
+		TempmailLOLRetries:      30,
+		TempmailLOLIntervalMS:   1500,
+		OAuthMinIntervalSec:     6, // stable: lower 4 easily hits device 429
+		OAuthRetrySec:           60,
+		OAuthWorkers:            0, // auto: 1 when thread≥3 or large target
+		OAuthGiveUpAfter:        10,
+		OAuthGrant:              "pkce",
+		OAuthConsentMode:        "auto",
+		OAuthConsentTimeoutSec:  60,
+		OAuthConsentConcurrency: 1,
+		ProbeEnabled:            true,
+		ProbeWarmupSec:          5, // stable: new tokens often 403 under 1.5–3s
+		CastleEnabled:           true,
+		CastlePK:                "",
+		CastleRequire:           true,
+		HTTPProxy:               "http://127.0.0.1:40080",
+		HTTPSProxy:              "http://127.0.0.1:40080",
+		NoProxy:                 "127.0.0.1,localhost",
+		CPAUploadEnabled:        false,
+		CPAManagementBase:       "http://localhost:8317/v0/management",
+		CPAUploadTimeoutSec:     30,
+		CPAUploadRetries:        2,
+		CPAUploadNameTemplate:   "{email}.json",
+		CPAUploadVerify:         true,
+		CPAUploadMode:           "multipart",
+		Sub2APIEnabled:          false,
+		Sub2APIBaseURL:          "http://127.0.0.1:8000",
+		Sub2APIPath:             "/api/v1/admin/accounts/import",
+		Sub2APITimeoutSec:       30,
+		Sub2APIRetries:          2,
 	}
 }
 
@@ -282,6 +288,9 @@ func Save(path string, cfg Config) error {
 	b.WriteString(fmt.Sprintf("OAUTH_WORKERS=%d\n", cfg.OAuthWorkers))
 	b.WriteString(fmt.Sprintf("OAUTH_GIVE_UP_AFTER=%d\n", cfg.OAuthGiveUpAfter))
 	b.WriteString(fmt.Sprintf("OAUTH_GRANT=%s\n", cfg.OAuthGrant))
+	b.WriteString(fmt.Sprintf("OAUTH_CONSENT_MODE=%s\n", cfg.OAuthConsentMode))
+	b.WriteString(fmt.Sprintf("OAUTH_CONSENT_TIMEOUT_SEC=%d\n", cfg.OAuthConsentTimeoutSec))
+	b.WriteString(fmt.Sprintf("OAUTH_CONSENT_CONCURRENCY=%d\n", cfg.OAuthConsentConcurrency))
 	b.WriteString(fmt.Sprintf("PHYSICAL_CAP=%d\n", cfg.PhysicalCap))
 	b.WriteString(fmt.Sprintf("CPA_UPLOAD_ENABLED=%s\n", bool01(cfg.CPAUploadEnabled)))
 	b.WriteString(fmt.Sprintf("CPA_MANAGEMENT_BASE=%s\n", cfg.CPAManagementBase))
@@ -572,6 +581,22 @@ func applyMap(cfg *Config, env map[string]string) {
 		switch g := strings.ToLower(strings.TrimSpace(v)); g {
 		case "pkce", "device", "auto":
 			cfg.OAuthGrant = g
+		}
+	}
+	if v, ok := env["OAUTH_CONSENT_MODE"]; ok {
+		switch m := strings.ToLower(strings.TrimSpace(v)); m {
+		case "auto", "browser", "http":
+			cfg.OAuthConsentMode = m
+		}
+	}
+	if v, ok := env["OAUTH_CONSENT_TIMEOUT_SEC"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.OAuthConsentTimeoutSec = n
+		}
+	}
+	if v, ok := env["OAUTH_CONSENT_CONCURRENCY"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.OAuthConsentConcurrency = n
 		}
 	}
 	if v, ok := env["PHYSICAL_CAP"]; ok {
