@@ -19,6 +19,40 @@ const nextJSConsentPage = `<!DOCTYPE html><html><body>` +
 	`\"authorizationDenied\":\"授权已拒绝\",\"deviceAuthorizedEn\":\"Device authorized\"}"])</script>` +
 	`</body></html>`
 
+// The consent bundle computes the posted principal id as
+//
+//	let $ = "Team" === principalType ? teamId ?? "" : "";
+//
+// so a browser consenting as a User posts principal_id with no value. The page
+// rendering value="" is the final answer, not a placeholder. Scraping the RSC
+// userId into that field sends something no browser sends.
+func TestParseHTMLFormFieldsDoesNotInjectPrincipalID(t *testing.T) {
+	html := `<html><body>` +
+		`<form action="https://auth.x.ai/oauth2/device/approve" method="POST">` +
+		`<input type="hidden" name="user_code" value="QPZ9-ZCN7">` +
+		`<input type="hidden" name="action" value="">` +
+		`<input type="hidden" name="principal_type" value="User">` +
+		`<input type="hidden" name="principal_id" value="">` +
+		`</form>` +
+		`<script>self.__next_f.push([1,"{\"userId\":\"9e533f92-ae08-48a7-8195-44dac4801e36\"}"])</script>` +
+		`</body></html>`
+
+	fields, action := parseHTMLFormFields(html)
+	if action != "https://auth.x.ai/oauth2/device/approve" {
+		t.Fatalf("form action = %q", action)
+	}
+	if got := fields.Get("principal_id"); got != "" {
+		t.Fatalf("principal_id = %q, want empty — the page's userId must never be posted as the principal", got)
+	}
+	if got := fields.Get("principal_type"); got != "User" {
+		t.Fatalf("principal_type = %q", got)
+	}
+	// The userId is still extractable for diagnostics; it just must not reach the form.
+	if pid := extractPrincipalID(html); pid != "9e533f92-ae08-48a7-8195-44dac4801e36" {
+		t.Fatalf("extractPrincipalID = %q, diagnostic extraction should still work", pid)
+	}
+}
+
 func TestAuthorizedBodyIgnoresInlinedI18nCatalog(t *testing.T) {
 	if authorizedBody(nextJSConsentPage) {
 		t.Fatal("pre-approval consent page reported as authorized: the i18n catalog inside " +

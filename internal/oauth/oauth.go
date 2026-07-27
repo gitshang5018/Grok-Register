@@ -304,52 +304,6 @@ func (c *Client) discover(ctx context.Context) (deviceEP, tokenEP string, err er
 	return deviceEP, tokenEP, nil
 }
 
-// principalFromSSO extracts user id from session SSO JWT for device approve form.
-func principalFromSSO(sso string) string {
-	for _, key := range []string{"sub", "user_id", "userId", "uid", "id", "principal_id", "principalId"} {
-		if v := jwtClaim(sso, key); v != "" {
-			return v
-		}
-	}
-	// nested claims common on some x.ai session tokens
-	parts := strings.Split(sso, ".")
-	if len(parts) != 3 {
-		return ""
-	}
-	payload := parts[1]
-	switch len(payload) % 4 {
-	case 2:
-		payload += "=="
-	case 3:
-		payload += "="
-	}
-	raw, err := base64.URLEncoding.DecodeString(payload)
-	if err != nil {
-		raw, err = base64.RawURLEncoding.DecodeString(parts[1])
-		if err != nil {
-			return ""
-		}
-	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil {
-		return ""
-	}
-	for _, nest := range []string{"user", "account", "identity", "profile"} {
-		if sub, ok := m[nest].(map[string]any); ok {
-			for _, key := range []string{"sub", "id", "user_id", "userId", "uid"} {
-				if v, ok := sub[key].(string); ok && v != "" {
-					return v
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// isDeviceDone reports whether a redirect target is the device-grant completion page.
-// It deliberately rejects /account and /console*: auth.x.ai redirects there on a failed
-// approve too, and accepting them made ConfirmHTTP report grants that were never
-// recorded, which surfaced later as invalid_grant from the token poll.
 func isDeviceDone(loc string) bool {
 	if loc == "" {
 		return false
@@ -515,17 +469,15 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	// Diagnostic context for operators (short).
 	_ = fmt.Sprintf("verify status=%d loc=%s", resp.StatusCode, trimLoc(loc))
 
-	// Base approve form. principal_id is REQUIRED for a real device grant on current
-	// auth.x.ai — empty principal_id often yields /device/done + token invalid_grant.
-	// SSO JWT only has session_id; principal_id comes from consent page userId state.
+	// Base approve form. principal_id stays EMPTY: the consent bundle computes it as
+	// `"Team" === principalType ? teamId : ""`, so a browser consenting as a User
+	// posts principal_id= with no value. Filling it with the page's userId — which
+	// this code used to do — sends a field the browser never sends.
 	aform := url.Values{
 		"user_code":      {flow.UserCode},
 		"action":         {"allow"},
 		"principal_type": {"User"},
 		"principal_id":   {""},
-	}
-	if pid := principalFromSSO(sso); pid != "" {
-		aform.Set("principal_id", pid)
 	}
 	// Prefer auth.x.ai approve (matches consent form action). accounts.x.ai may 30x.
 	approveTarget := ApproveURL
@@ -536,8 +488,11 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 			c.logDiag("dynamic form action: %q", approveTarget)
 		}
 		for k, vs := range fields {
-			if k == "action" {
+			switch k {
+			case "action":
 				continue // never take empty/deny from page
+			case "principal_id":
+				continue // page value is authoritative and is empty for User
 			}
 			if len(vs) > 0 && vs[0] != "" {
 				aform.Set(k, vs[0])
@@ -552,10 +507,6 @@ func (c *Client) ConfirmHTTP(ctx context.Context, sso string, flow DeviceFlow) e
 	}
 	// Always force allow after HTML overlay.
 	aform.Set("action", "allow")
-	if aform.Get("principal_id") == "" {
-		c.logDiag("confirm_approve missing principal_id (SSO has no user id; consent parse failed)")
-		return fmt.Errorf("consent_missing_principal_id")
-	}
 	// Form action from consent is usually https://auth.x.ai/oauth2/device/approve
 	if approveTarget == "" || (!strings.Contains(approveTarget, "auth.x.ai") && !strings.Contains(approveTarget, "accounts.x.ai")) {
 		approveTarget = ApproveURL
@@ -846,8 +797,19 @@ func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string)
 		}
 	}
 
+	// Whose account did the consent page render for? Never posted — but if this
+	// disagrees with the account being registered, the SSO cookie belongs to
+	// someone else, which is exactly how cross-contaminated sessions surface.
+	c.logDiag("consent page identity userId=%s", orDash(extractPrincipalID(html)))
 	fields, action := parseHTMLFormFields(html)
 	return fields, newCookie, action
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func parseHTMLFormFields(html string) (url.Values, string) {
@@ -905,17 +867,20 @@ func parseHTMLFormFields(html string) (url.Values, string) {
 		}
 	}
 
-	// Consent HTML often embeds React Query / RSC state with escaped JSON:
-	//   \"userId\":\"56f924f3-2ffd-4eeb-931a-dc4db062d1d3\"
-	// The hidden form input principal_id is frequently empty; pull userId from state.
-	if pid := extractPrincipalID(html); pid != "" {
-		out.Set("principal_id", pid)
-	}
 	return out, action
 }
 
 // extractPrincipalID finds the accounts.x.ai user UUID in consent HTML / RSC payload.
-// SSO session JWT only carries session_id — principal_id must come from the page state.
+//
+// This is diagnostic only. It must NOT be used to fill the consent form's
+// principal_id: the consent bundle computes that field as
+//
+//	let $ = "Team" === k ? D ?? "" : "";
+//
+// so for principal_type=User a real browser posts an EMPTY principal_id. The
+// hidden input rendering as value="" is the final value, not a placeholder
+// waiting to be filled. Injecting the page's userId sends something the browser
+// never sends and the authorization is refused.
 func extractPrincipalID(html string) string {
 	patterns := []string{
 		// Most common on accounts.x.ai consent (backslash-escaped JSON inside a JS string)

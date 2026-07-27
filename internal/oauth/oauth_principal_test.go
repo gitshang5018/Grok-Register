@@ -32,14 +32,6 @@ func TestExtractPrincipalID_Empty(t *testing.T) {
 	}
 }
 
-func TestPrincipalFromSSO_SessionOnly(t *testing.T) {
-	// Real SSO shape: only session_id, no user principal.
-	sso := "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiOTEzYmRhMzAtNzBmYy00NTNjLTkxNjctMmRkOTk0MDJkYmY4In0.2dxHO-3JRewOOot3LJoiCcDpaZ01wD74a_S4wFoM4UU"
-	if pid := principalFromSSO(sso); pid != "" {
-		t.Fatalf("session-only SSO should not yield principal, got %q", pid)
-	}
-}
-
 func TestSanitizeSessionCookies(t *testing.T) {
 	in := "sso=abc.def.ghi; mp_0b4055a12491884bcb6f34a5aa2718b6_mixpanel=x; __cf_bm=y; sso-rw=z"
 	got := sanitizeSessionCookies(in)

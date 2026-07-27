@@ -289,7 +289,11 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	}
 	form := url.Values{}
 	for k, vs := range fields {
-		if len(vs) > 0 && vs[0] != "" && k != "action" {
+		switch k {
+		case "action", "principal_id":
+			continue
+		}
+		if len(vs) > 0 && vs[0] != "" {
 			form.Set(k, vs[0])
 		}
 	}
@@ -297,13 +301,11 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	if form.Get("principal_type") == "" {
 		form.Set("principal_type", "User")
 	}
-	if form.Get("principal_id") == "" {
-		if pid := extractPrincipalID(html); pid != "" {
-			form.Set("principal_id", pid)
-		} else {
-			return "", cookie, fmt.Errorf("pkce_consent_missing_principal_id")
-		}
-	}
+	// Empty, deliberately, and sent rather than omitted. The consent bundle computes
+	// principalId as `"Team" === principalType ? teamId : ""`, so consenting as a
+	// User posts principal_id with no value.
+	form.Set("principal_id", "")
+	c.logDiag("pkce_consent page identity userId=%s", orDash(extractPrincipalID(html)))
 
 	target := absURL(consentURL, action)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(form.Encode()))
