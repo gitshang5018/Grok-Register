@@ -840,10 +840,15 @@ func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string)
 }
 
 // formButton is a submit control scraped from a consent form.
+// formButton is a control scraped from a consent form. Type matters: the device
+// consent uses type=submit buttons plus a hidden action field, while the
+// authorize consent uses type=button, which never submits the form natively —
+// there, the page's own script decides what to send.
 type formButton struct {
 	Name       string
 	Value      string
 	Text       string
+	Type       string
 	FormAction string
 }
 
@@ -954,6 +959,7 @@ func parseFormButtons(html string) []formButton {
 			Name:       attrValue(attrs, "name"),
 			Value:      attrValue(attrs, "value"),
 			Text:       text,
+			Type:       strings.ToLower(attrValue(attrs, "type")),
 			FormAction: attrValue(attrs, "formaction"),
 		})
 	}
@@ -988,7 +994,8 @@ func describeButtons(buttons []formButton) string {
 	}
 	parts := make([]string, 0, len(buttons))
 	for _, b := range buttons {
-		parts = append(parts, fmt.Sprintf("%s=%s(%s)fa=%s", orDash(b.Name), orDash(b.Value), orDash(b.Text), orDash(trimLoc(b.FormAction))))
+		parts = append(parts, fmt.Sprintf("%s=%s(%s)type=%s fa=%s",
+			orDash(b.Name), orDash(b.Value), orDash(b.Text), orDash(b.Type), orDash(trimLoc(b.FormAction))))
 	}
 	return strings.Join(parts, " | ")
 }
