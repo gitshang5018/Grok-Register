@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -265,17 +264,6 @@ func (c *Client) authorizeCode(ctx context.Context, sso string, sess pkceSession
 // submitConsent posts the authorize-flow consent form, reusing the same field
 // scraping the device flow uses. Returns the response Location and cookie jar.
 func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie string) (string, string, error) {
-	fields, action := parseHTMLFormFields(html)
-	// The authorize-flow consent form is a different component from the device
-	// one, so log what was actually scraped: a denial caused by a field we never
-	// sent is otherwise indistinguishable from an account-level refusal.
-	names := make([]string, 0, len(fields))
-	for k, vs := range fields {
-		filled := len(vs) > 0 && vs[0] != ""
-		names = append(names, fmt.Sprintf("%s=%t", k, filled))
-	}
-	sort.Strings(names)
-	c.logDiag("pkce_consent_form action=%q fields[%s]", trimLoc(action), strings.Join(names, ","))
 	if os.Getenv("GROK_OAUTH_DEBUG_HTML") == "1" {
 		name := fmt.Sprintf("pkce_consent_%d.html", time.Now().UnixNano())
 		if werr := os.WriteFile(name, []byte(html), 0o600); werr != nil {
@@ -284,37 +272,44 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 			c.logDiag("pkce consent page dumped to %s", name)
 		}
 	}
-	if action == "" {
-		return "", cookie, fmt.Errorf("pkce_consent_form_missing")
+
+	// Parse per form. The consent page carries several — sign out, deny, allow —
+	// and the observed buttons all had empty name and value, so approval cannot be
+	// a field on a shared form. Submitting the allow form itself is the approval.
+	forms := parseForms(html)
+	c.logDiag("pkce_consent_forms %s", describeForms(forms))
+	target, ok := approvalForm(forms)
+	if !ok {
+		return "", cookie, fmt.Errorf("pkce_consent_no_approval_form forms=[%s]", describeForms(forms))
 	}
-	// Forward every field the page defines, empty ones included: a browser submits
+	if target.Action == "" {
+		return "", cookie, fmt.Errorf("pkce_consent_form_missing_action")
+	}
+
+	// Forward that form's own fields verbatim, empty ones included: a browser posts
 	// principal_id= and referrer= with no value rather than omitting them, and the
-	// page's values for client_id / state / nonce / code_challenge / scope must
-	// travel back unmodified. 'action' is decided below.
+	// page's client_id / state / nonce / code_challenge / scope must travel back
+	// unmodified.
 	form := url.Values{}
-	for k, vs := range fields {
-		if k == "action" {
-			continue
-		}
+	for k, vs := range target.Fields {
 		v := ""
 		if len(vs) > 0 {
 			v = vs[0]
 		}
 		form.Set(k, v)
 	}
-	// Only force action=allow when the form actually carries that control. The
-	// authorize-flow consent form has no action input — approval rides on the
-	// submit button's name/value instead, and adding a field the form does not
-	// define is not how the page submits.
-	buttons := parseFormButtons(html)
-	c.logDiag("pkce_consent_buttons %s", describeButtons(buttons))
-	if _, hasAction := fields["action"]; hasAction {
+	// Only when the form defines it — the device consent shape puts allow and deny
+	// on one form and distinguishes them with this field.
+	if _, hasAction := target.Fields["action"]; hasAction {
 		form.Set("action", "allow")
-	} else if b, ok := approveButton(buttons); ok {
-		form.Set(b.Name, b.Value)
-		c.logDiag("pkce_consent approval via button %s=%s (%s)", b.Name, orDash(b.Value), b.Text)
-	} else {
-		return "", cookie, fmt.Errorf("pkce_consent_no_approval_control buttons=[%s]", describeButtons(buttons))
+	}
+	// A named approval button contributes its own pair when it has one.
+	for _, b := range target.Buttons {
+		if b.Name != "" && isApproveLabel(b) && !isDenyLabel(b) {
+			form.Set(b.Name, b.Value)
+			c.logDiag("pkce_consent approval button %s=%s", b.Name, orDash(b.Value))
+			break
+		}
 	}
 	if form.Get("principal_type") == "" {
 		form.Set("principal_type", "User")
@@ -326,8 +321,17 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	}
 	c.logDiag("pkce_consent page identity userId=%s", orDash(extractPrincipalID(html)))
 
-	target := absURL(consentURL, action)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(form.Encode()))
+	action := target.Action
+	// A button may override the form's action attribute.
+	for _, b := range target.Buttons {
+		if b.FormAction != "" && isApproveLabel(b) && !isDenyLabel(b) {
+			action = b.FormAction
+			c.logDiag("pkce_consent using button formaction %q", trimLoc(action))
+			break
+		}
+	}
+	postTarget := absURL(consentURL, action)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, postTarget, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", cookie, err
 	}

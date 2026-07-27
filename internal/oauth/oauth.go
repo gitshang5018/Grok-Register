@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -807,15 +808,104 @@ func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string)
 
 // formButton is a submit control scraped from a consent form.
 type formButton struct {
-	Name  string
-	Value string
-	Text  string
+	Name       string
+	Value      string
+	Text       string
+	FormAction string
+}
+
+// htmlForm is one <form> element with only its own inputs and buttons.
+type htmlForm struct {
+	Action  string
+	Fields  url.Values
+	Buttons []formButton
 }
 
 var (
 	buttonTagRe = regexp.MustCompile(`(?is)<button\b([^>]*)>(.*?)</button>`)
+	formBlockRe = regexp.MustCompile(`(?is)<form\b([^>]*)>(.*?)</form>`)
 	tagStripRe  = regexp.MustCompile(`(?s)<[^>]*>`)
 )
+
+// parseForms splits the page into individual forms. The consent page carries
+// several — sign-out, deny and allow — and scraping inputs across the whole
+// document merges fields that belong to different forms and pairs them with
+// whichever action came first. When allow and deny are separate forms, posting
+// the allow form IS the approval; there is no field to set.
+func parseForms(html string) []htmlForm {
+	var out []htmlForm
+	for _, m := range formBlockRe.FindAllStringSubmatch(html, -1) {
+		attrs, inner := m[1], m[2]
+		out = append(out, htmlForm{
+			Action:  attrValue(attrs, "action"),
+			Fields:  parseInputFields(inner),
+			Buttons: parseFormButtons(inner),
+		})
+	}
+	return out
+}
+
+// approvalForm picks the form whose own controls grant consent, preferring a
+// form that holds an approval button over one that merely posts somewhere
+// plausible. Forms whose only control denies are never selected.
+func approvalForm(forms []htmlForm) (htmlForm, bool) {
+	for _, f := range forms {
+		hasApprove, hasDeny := false, false
+		for _, b := range f.Buttons {
+			if isDenyLabel(b) {
+				hasDeny = true
+				continue
+			}
+			if isApproveLabel(b) {
+				hasApprove = true
+			}
+		}
+		if hasApprove && !hasDeny {
+			return f, true
+		}
+	}
+	// Allow and deny may share one form (the device consent shape), in which case
+	// an explicit action field decides. Fall back to any form holding an approval.
+	for _, f := range forms {
+		for _, b := range f.Buttons {
+			if isApproveLabel(b) {
+				return f, true
+			}
+		}
+	}
+	return htmlForm{}, false
+}
+
+func isDenyLabel(b formButton) bool {
+	blob := strings.ToLower(b.Text + " " + b.Value)
+	return strings.Contains(b.Text, "拒绝") || strings.Contains(blob, "deny") ||
+		strings.Contains(blob, "reject") || strings.Contains(blob, "cancel") ||
+		strings.Contains(blob, "sign out") || strings.Contains(blob, "logout")
+}
+
+func isApproveLabel(b formButton) bool {
+	blob := strings.ToLower(b.Text + " " + b.Value)
+	return strings.Contains(b.Text, "允许") || strings.Contains(b.Text, "授权") ||
+		strings.Contains(blob, "allow") || strings.Contains(blob, "approve") ||
+		strings.Contains(blob, "authorize") || strings.Contains(blob, "accept")
+}
+
+func describeForms(forms []htmlForm) string {
+	if len(forms) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(forms))
+	for i, f := range forms {
+		names := make([]string, 0, len(f.Fields))
+		for k := range f.Fields {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		parts = append(parts, fmt.Sprintf("#%d action=%s inputs[%s] buttons[%s]",
+			i, orDash(trimLoc(f.Action)), strings.Join(names, ","), describeButtons(f.Buttons)))
+	}
+	return strings.Join(parts, " ;; ")
+}
 
 // parseFormButtons scrapes <button> controls. parseHTMLFormFields only reads
 // <input> tags, which is enough for the device consent form — it carries an
@@ -828,9 +918,10 @@ func parseFormButtons(html string) []formButton {
 		attrs, inner := m[1], m[2]
 		text := strings.Join(strings.Fields(tagStripRe.ReplaceAllString(inner, " ")), " ")
 		out = append(out, formButton{
-			Name:  attrValue(attrs, "name"),
-			Value: attrValue(attrs, "value"),
-			Text:  text,
+			Name:       attrValue(attrs, "name"),
+			Value:      attrValue(attrs, "value"),
+			Text:       text,
+			FormAction: attrValue(attrs, "formaction"),
 		})
 	}
 	return out
@@ -864,7 +955,7 @@ func describeButtons(buttons []formButton) string {
 	}
 	parts := make([]string, 0, len(buttons))
 	for _, b := range buttons {
-		parts = append(parts, fmt.Sprintf("%s=%s(%s)", orDash(b.Name), orDash(b.Value), orDash(b.Text)))
+		parts = append(parts, fmt.Sprintf("%s=%s(%s)fa=%s", orDash(b.Name), orDash(b.Value), orDash(b.Text), orDash(trimLoc(b.FormAction))))
 	}
 	return strings.Join(parts, " | ")
 }
@@ -876,19 +967,10 @@ func orDash(s string) string {
 	return s
 }
 
-func parseHTMLFormFields(html string) (url.Values, string) {
+// parseInputFields scrapes <input name=... value=...> from one HTML fragment.
+func parseInputFields(html string) url.Values {
 	out := url.Values{}
-	action := ""
-	
-	lowHTML := strings.ToLower(html)
-	if formIdx := strings.Index(lowHTML, "<form"); formIdx >= 0 {
-		if end := strings.Index(html[formIdx:], ">"); end >= 0 {
-			action = attrValue(html[formIdx:formIdx+end], "action")
-		}
-	}
-	// input ... name="..." ... value="..." (order may vary)
 	lower := html
-	// naive scan for name= and value= pairs on input tags
 	for i := 0; i < len(html); {
 		idx := strings.Index(strings.ToLower(lower[i:]), "<input")
 		if idx < 0 {
@@ -905,8 +987,26 @@ func parseHTMLFormFields(html string) (url.Values, string) {
 		if name == "" {
 			continue
 		}
-		val := attrValue(tag, "value")
-		out.Set(name, val)
+		out.Set(name, attrValue(tag, "value"))
+	}
+	return out
+}
+
+func parseHTMLFormFields(html string) (url.Values, string) {
+	out := url.Values{}
+	action := ""
+	
+	lowHTML := strings.ToLower(html)
+	if formIdx := strings.Index(lowHTML, "<form"); formIdx >= 0 {
+		if end := strings.Index(html[formIdx:], ">"); end >= 0 {
+			action = attrValue(html[formIdx:formIdx+end], "action")
+		}
+	}
+	lower := html
+	for k, vs := range parseInputFields(html) {
+		if len(vs) > 0 {
+			out.Set(k, vs[0])
+		}
 	}
 
 	// Also scan for <meta name="_csrf" content="...">

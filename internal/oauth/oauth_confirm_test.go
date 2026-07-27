@@ -53,6 +53,57 @@ func TestParseHTMLFormFieldsDoesNotInjectPrincipalID(t *testing.T) {
 	}
 }
 
+// The real /oauth2/consent page carries three buttons — Sign out, Deny, Allow —
+// all with empty name and value, so approval cannot be a field on a shared form.
+// They belong to separate forms, and submitting the allow form IS the approval.
+// Scraping inputs across the whole document merges fields from every form and
+// pairs them with whichever action came first.
+func TestApprovalFormIsolatesTheAllowForm(t *testing.T) {
+	html := `<html><body>` +
+		`<form action="/auth/sign-out" method="POST">` +
+		`<input type="hidden" name="csrf" value="SIGNOUT">` +
+		`<button type="submit"><span></span>Sign out</button></form>` +
+		`<form action="https://auth.x.ai/oauth2/deny" method="POST">` +
+		`<input type="hidden" name="state" value="DENYSTATE">` +
+		`<button type="submit"><span></span>Deny</button></form>` +
+		`<form action="https://auth.x.ai/oauth2/authorize" method="POST">` +
+		`<input type="hidden" name="client_id" value="CID">` +
+		`<input type="hidden" name="state" value="ALLOWSTATE">` +
+		`<input type="hidden" name="principal_id" value="">` +
+		`<button type="submit"><span></span>Allow</button></form>` +
+		`</body></html>`
+
+	forms := parseForms(html)
+	if len(forms) != 3 {
+		t.Fatalf("parsed %d forms, want 3", len(forms))
+	}
+
+	got, ok := approvalForm(forms)
+	if !ok {
+		t.Fatal("no approval form selected")
+	}
+	if got.Action != "https://auth.x.ai/oauth2/authorize" {
+		t.Fatalf("selected form action = %q — must be the allow form", got.Action)
+	}
+	if v := got.Fields.Get("state"); v != "ALLOWSTATE" {
+		t.Fatalf("state = %q, want ALLOWSTATE — fields leaked in from another form", v)
+	}
+	if _, leaked := got.Fields["csrf"]; leaked {
+		t.Fatal("sign-out form's csrf leaked into the approval form")
+	}
+	if _, ok := got.Fields["principal_id"]; !ok {
+		t.Fatal("empty principal_id must be preserved, not dropped")
+	}
+}
+
+func TestApprovalFormNeverPicksDenyOrSignOut(t *testing.T) {
+	html := `<form action="/deny"><button>Deny</button></form>` +
+		`<form action="/out"><button>Sign out</button></form>`
+	if f, ok := approvalForm(parseForms(html)); ok {
+		t.Fatalf("selected %q when the page offers no approval control", f.Action)
+	}
+}
+
 func TestParseFormButtonsAndApproveSelection(t *testing.T) {
 	// Shape of the real consent controls: a denial and an approval, with the label
 	// wrapped in spans the way the live page renders it.
