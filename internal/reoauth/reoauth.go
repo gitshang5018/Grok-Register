@@ -55,6 +55,17 @@ type Options struct {
 	Secret          []byte
 	Uploader        *cpa.Uploader
 	Sub2APIUploader *sub2api.Uploader
+	Grant           string // pkce | device | auto; empty = pkce
+}
+
+// grantName normalizes Options.Grant for logging and result reporting.
+func grantName(grant string) string {
+	switch g := strings.ToLower(strings.TrimSpace(grant)); g {
+	case "device", "auto", "pkce":
+		return g
+	default:
+		return "pkce"
+	}
 }
 
 func logf(opt Options, f string, a ...any) {
@@ -574,8 +585,8 @@ func reauthOne(ctx context.Context, cli *oauth.Client, a Account, opt Options) R
 		method = "refresh"
 		cred, err = cli.Refresh(ctx, a.RefreshToken)
 	} else if strings.TrimSpace(a.SSO) != "" {
-		method = "device"
-		cred, err = cli.Exchange(ctx, a.SSO)
+		method = grantName(opt.Grant)
+		cred, err = cli.ExchangeGrant(ctx, a.SSO, opt.Grant)
 	} else {
 		res.Method = "skip"
 		res.Err = "无 refresh_token 且无 sso（inspection 仅含 email 时请提供本地 outputs 或 CPA/accounts）"
@@ -583,11 +594,11 @@ func reauthOne(ctx context.Context, cli *oauth.Client, a Account, opt Options) R
 	}
 	res.Method = method
 	if err != nil {
-		// if refresh failed, try device when sso present
+		// if refresh failed, re-authorize from the sso session when present
 		if method == "refresh" && strings.TrimSpace(a.SSO) != "" {
-			logf(opt, "  %s refresh 失败，回退 device…", email)
-			cred, err = cli.Exchange(ctx, a.SSO)
-			res.Method = "device"
+			logf(opt, "  %s refresh 失败，回退 %s…", email, grantName(opt.Grant))
+			cred, err = cli.ExchangeGrant(ctx, a.SSO, opt.Grant)
+			res.Method = grantName(opt.Grant)
 		}
 	}
 	if err != nil {

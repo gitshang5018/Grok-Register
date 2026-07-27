@@ -995,6 +995,7 @@ func cmdReoauth(args []string) error {
 		},
 		Uploader:        cpaUploader,
 		Sub2APIUploader: sub2apiUploader,
+		Grant:           cfg.OAuthGrant,
 	}
 
 	_, err = reoauth.Run(ctx, accs, opts)

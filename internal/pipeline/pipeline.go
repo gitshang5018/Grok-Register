@@ -971,7 +971,7 @@ func (e *Engine) oauthWorker(ctx context.Context, id int) {
 		if len(ssoPrev) > 24 {
 			ssoPrev = ssoPrev[:12] + "…" + ssoPrev[len(ssoPrev)-8:]
 		}
-		cred, err := e.oauth.Exchange(ctx, job.SSO)
+		cred, err := e.oauth.ExchangeGrant(ctx, job.SSO, e.opt.Cfg.OAuthGrant)
 		if err != nil {
 			log.Warnf("OAuth fail %s: %v (%.1fs) sso=%s", job.Email, err, time.Since(t0).Seconds(), ssoPrev)
 			e.fail.Add(1)
