@@ -397,20 +397,30 @@ var (
 
 const defaultConsentActionID = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
 
+func resolveURL(baseURL, ref string) string {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ref
+	}
+	refU, err := url.Parse(ref)
+	if err != nil {
+		return ref
+	}
+	return base.ResolveReference(refU).String()
+}
+
 func discoverConsentActionIDs(ctx context.Context, c *Client, consentURL, html string) []string {
 	var sources []string
 	sources = append(sources, html)
 
 	matches := rxScriptSrc.FindAllStringSubmatch(html, -1)
+	fetched := 0
 	for _, m := range matches {
-		if len(m) < 2 {
+		if len(m) < 2 || fetched >= 16 {
 			continue
 		}
 		src := m[1]
-		if !strings.Contains(src, "chunk") && !strings.Contains(src, "app") && !strings.Contains(src, "consent") && !strings.Contains(src, "_next") {
-			continue
-		}
-		scriptURL := absURL(consentURL, src)
+		scriptURL := resolveURL(consentURL, src)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, scriptURL, nil)
 		if err != nil {
 			continue
@@ -425,7 +435,9 @@ func discoverConsentActionIDs(ctx context.Context, c *Client, consentURL, html s
 		if len(body) > 0 {
 			sources = append(sources, string(body))
 		}
+		fetched++
 	}
+	c.logDiag("pkce_consent fetched %d script bundles from consent page", fetched)
 
 	combined := strings.Join(sources, "\n")
 	var ids []string

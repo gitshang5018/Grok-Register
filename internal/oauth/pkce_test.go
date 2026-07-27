@@ -149,3 +149,12 @@ func TestDiscoverConsentActionIDs(t *testing.T) {
 		t.Fatalf("expected 1234567890abcdef1234567890abcdef12345678 in discovered IDs: %v", ids)
 	}
 }
+
+func TestResolveURL(t *testing.T) {
+	base := "https://accounts.x.ai/oauth2/consent?response_type=code&client_id=b1a00492"
+	got := resolveURL(base, "/_next/static/chunks/073qnqzc81yfr.js")
+	want := "https://accounts.x.ai/_next/static/chunks/073qnqzc81yfr.js"
+	if got != want {
+		t.Fatalf("resolveURL = %q, want %q", got, want)
+	}
+}
