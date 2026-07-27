@@ -385,11 +385,12 @@ type rscConsentPayload struct {
 }
 
 var (
-	rxServerAction1 = regexp.MustCompile(`(?i)createServerReference\)\("([a-f0-9]{40,64})"[^)]*submitOAuth2Consent`)
-	rxServerAction2 = regexp.MustCompile(`(?i)(?:next-action|serverReference|actionId)[^a-f0-9]+([a-f0-9]{40,64})`)
-	rxServerAction3 = regexp.MustCompile(`(?i)([a-f0-9]{40,64}).{0,600}submitOAuth2Consent`)
-	rxServerAction4 = regexp.MustCompile(`(?i)submitOAuth2Consent.{0,600}([a-f0-9]{40,64})`)
-	rxServerAction5 = regexp.MustCompile(`(?i)createServerReference\)\("([a-f0-9]{40,64})"`)
+	rxServerAction1 = regexp.MustCompile(`(?i)createServerReference\)?\([^"]*"([a-f0-9]{40,64})"`)
+	rxServerAction2 = regexp.MustCompile(`(?i)registerServerReference\([^"]*"([a-f0-9]{40,64})"`)
+	rxServerAction3 = regexp.MustCompile(`(?i)(?:next-action|serverReference|actionId|action_id)[^a-f0-9]+([a-f0-9]{40,64})`)
+	rxServerAction4 = regexp.MustCompile(`(?i)([a-f0-9]{40,64}).{0,1000}submitOAuth2Consent`)
+	rxServerAction5 = regexp.MustCompile(`(?i)submitOAuth2Consent.{0,1000}([a-f0-9]{40,64})`)
+	rxHex40         = regexp.MustCompile(`\b([a-f0-9]{40}|[a-f0-9]{64})\b`)
 	rxScriptSrc     = regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']+)["']`)
 	rxCodeJSON      = regexp.MustCompile(`(?i)"code"\s*:\s*"([^"]+)"`)
 	rxCodeQuery     = regexp.MustCompile(`(?i)(?:[?&]|\\u0026)code=([A-Za-z0-9._~\-]+)`)
@@ -461,6 +462,17 @@ func discoverConsentActionIDs(ctx context.Context, c *Client, consentURL, html s
 			}
 		}
 	}
+
+	for _, srcText := range sources {
+		if strings.Contains(srcText, "submitOAuth2Consent") || strings.Contains(srcText, "createServerReference") {
+			for _, m := range rxHex40.FindAllStringSubmatch(srcText, -1) {
+				if len(m) > 1 {
+					addID(m[1])
+				}
+			}
+		}
+	}
+
 	addID(defaultConsentActionID)
 	return ids
 }
