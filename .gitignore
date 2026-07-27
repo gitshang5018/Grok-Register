@@ -34,3 +34,6 @@ logs/
 
 # OAuth consent dumps (GROK_OAUTH_DEBUG_HTML=1) — contain userId, email and session state
 consent_debug*.html
+
+.worktrees/
+.superpowers/
