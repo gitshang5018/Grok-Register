@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,6 +59,28 @@ func TestParseHTMLFormFieldsDoesNotInjectPrincipalID(t *testing.T) {
 // They belong to separate forms, and submitting the allow form IS the approval.
 // Scraping inputs across the whole document merges fields from every form and
 // pairs them with whichever action came first.
+func TestSanitizeSessionCookiesKeepsSecurityState(t *testing.T) {
+	in := "sso=a.b.c; __Host-csrf=TOKEN; __Secure-oauth-state=ST; " +
+		"__cf_bm=drop; mp_x_mixpanel=drop; _ga=drop; cf_clearance=drop"
+	got := sanitizeSessionCookies(in)
+
+	// Dropping these took the CSRF and oauth-state cookies with them, and the
+	// consent POST was then answered as a denial.
+	for _, want := range []string{"sso=a.b.c", "__Host-csrf=TOKEN", "__Secure-oauth-state=ST"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("dropped required cookie %q from %q", want, got)
+		}
+	}
+	for _, banned := range []string{"__cf_bm", "mixpanel", "_ga=", "cf_clearance"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("analytics/CF cookie %q leaked into the OAuth path: %q", banned, got)
+		}
+	}
+	if d := droppedCookieNames(in); !strings.Contains(d, "__cf_bm") || strings.Contains(d, "__Host-csrf") {
+		t.Fatalf("droppedCookieNames = %q, should list the analytics drops and not the kept ones", d)
+	}
+}
+
 func TestApprovalFormIsolatesTheAllowForm(t *testing.T) {
 	html := `<html><body>` +
 		`<form action="/auth/sign-out" method="POST">` +

@@ -179,7 +179,10 @@ func (c *Client) ExchangePKCE(ctx context.Context, sso string) (Credential, erro
 // authorizeCode walks the redirect chain from /oauth2/authorize to the callback,
 // submitting the consent form if the account has not consented before.
 func (c *Client) authorizeCode(ctx context.Context, sso string, sess pkceSession) (string, error) {
-	cookie := sanitizeSessionCookies("sso=" + sso)
+	// Carry the raw jar and sanitize only at send time. Sanitizing in the loop
+	// discarded every Set-Cookie the consent page issued — including any CSRF or
+	// oauth-state cookie — before the consent POST could present it back.
+	cookie := "sso=" + sso
 	next := sess.authorizeURL()
 	consented := false
 
@@ -191,7 +194,7 @@ func (c *Client) authorizeCode(ctx context.Context, sso string, sess pkceSession
 		req.Header.Set("User-Agent", c.ua)
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-		req.Header.Set("Cookie", cookie)
+		req.Header.Set("Cookie", sanitizeSessionCookies(cookie))
 		req.Header.Set("Sec-Fetch-Site", "same-site")
 		req.Header.Set("Sec-Fetch-Mode", "navigate")
 		req.Header.Set("Sec-Fetch-Dest", "document")
@@ -204,7 +207,7 @@ func (c *Client) authorizeCode(ctx context.Context, sso string, sess pkceSession
 		loc := resp.Header.Get("Location")
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
-		cookie = sanitizeSessionCookies(mergeSetCookies(cookie, resp.Header))
+		cookie = mergeSetCookies(cookie, resp.Header)
 		c.logDiag("pkce_authorize hop=%d status=%d loc=%q bodyLen=%d", hop, resp.StatusCode, trimLoc(loc), len(body))
 
 		if isCallback(loc) {
@@ -278,6 +281,7 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	// a field on a shared form. Submitting the allow form itself is the approval.
 	forms := parseForms(html)
 	c.logDiag("pkce_consent_forms %s", describeForms(forms))
+	c.logDiag("pkce_consent_cookies sent=%s dropped=%s", cookieNames(sanitizeSessionCookies(cookie)), droppedCookieNames(cookie))
 	target, ok := approvalForm(forms)
 	if !ok {
 		return "", cookie, fmt.Errorf("pkce_consent_no_approval_form forms=[%s]", describeForms(forms))
@@ -347,7 +351,7 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	loc := resp.Header.Get("Location")
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
-	cookie = sanitizeSessionCookies(mergeSetCookies(cookie, resp.Header))
+	cookie = mergeSetCookies(cookie, resp.Header)
 	c.logDiag("pkce_consent status=%d loc=%q bodyLen=%d pid=%t", resp.StatusCode, trimLoc(loc), len(body), form.Get("principal_id") != "")
 
 	if err := locationError(loc); err != nil {

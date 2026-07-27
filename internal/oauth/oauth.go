@@ -724,6 +724,13 @@ func sanitizeSessionCookies(cookie string) string {
 			// never
 		case strings.HasPrefix(name, "__cf"), strings.HasPrefix(name, "mp_"), strings.HasPrefix(name, "_ga"), strings.HasPrefix(name, "_gid"), strings.HasPrefix(name, "ajs_"):
 			// analytics / CF bot management — drop
+		case strings.HasPrefix(name, "__host-"), strings.HasPrefix(name, "__secure-"):
+			// Host/Secure-prefixed cookies are same-site security state, not tracking:
+			// dropping them takes the CSRF and oauth-state cookies with them, and the
+			// consent POST is then answered as a denial.
+			keep = append(keep, part)
+		case strings.Contains(name, "csrf"), strings.Contains(name, "xsrf"), strings.Contains(name, "oauth"), strings.Contains(name, "consent"):
+			keep = append(keep, part)
 		default:
 			// drop unknown by default on OAuth path
 		}
@@ -779,6 +786,32 @@ func (c *Client) getWithCookie(ctx context.Context, rawURL, cookie string) (int,
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	updatedCookie := mergeSetCookies(cookie, resp.Header)
 	return resp.StatusCode, string(body), updatedCookie, nil
+}
+
+// droppedCookieNames reports which cookies sanitizeSessionCookies discards, so a
+// consent refusal caused by a stripped CSRF cookie is visible rather than silent.
+func droppedCookieNames(before string) string {
+	kept := map[string]struct{}{}
+	for _, p := range strings.Split(sanitizeSessionCookies(before), ";") {
+		if n := strings.SplitN(strings.TrimSpace(p), "=", 2)[0]; n != "" {
+			kept[n] = struct{}{}
+		}
+	}
+	var gone []string
+	for _, p := range strings.Split(before, ";") {
+		n := strings.SplitN(strings.TrimSpace(p), "=", 2)[0]
+		if n == "" {
+			continue
+		}
+		if _, ok := kept[n]; !ok {
+			gone = append(gone, n)
+		}
+	}
+	if len(gone) == 0 {
+		return "-"
+	}
+	sort.Strings(gone)
+	return strings.Join(gone, ",")
 }
 
 // loadConsentForm GETs consent page and extracts form fields (principal_id, csrf, etc.).
