@@ -216,8 +216,18 @@ func (c *Client) browserConsent(ctx context.Context, consentURL, cookie, wantSta
 	if to <= 0 {
 		to = 60 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, to)
+	// Parent budget slightly above script timeout so the script can print JSON
+	// before CommandContext sends kill (VPS often needs the extra headroom).
+	parentTO := to + 20*time.Second
+	ctx, cancel := context.WithTimeout(ctx, parentTO)
 	defer cancel()
+
+	mode := "offscreen"
+	if m := strings.TrimSpace(os.Getenv("OAUTH_CONSENT_BROWSER_MODE")); m != "" {
+		mode = m
+	} else if m := strings.TrimSpace(os.Getenv("TURNSTILE_MODE")); m != "" {
+		mode = m
+	}
 
 	args := []string{
 		script,
@@ -225,7 +235,7 @@ func (c *Client) browserConsent(ctx context.Context, consentURL, cookie, wantSta
 		"--cookie", cookie,
 		"--timeout", fmt.Sprintf("%.0f", to.Seconds()),
 		"--expected-state", wantState,
-		"--mode", "offscreen",
+		"--mode", mode,
 	}
 	if c != nil && strings.TrimSpace(c.proxy) != "" {
 		args = append(args, "--proxy", strings.TrimSpace(c.proxy))
@@ -234,12 +244,13 @@ func (c *Client) browserConsent(ctx context.Context, consentURL, cookie, wantSta
 		args = append(args, "--chrome", chrome)
 	}
 
-	cmd := exec.CommandContext(ctx, py, args...)
+	bin, binArgs := maybeXvfbConsent(py, args, mode)
+	cmd := exec.CommandContext(ctx, bin, binArgs...)
 	cmd.Env = os.Environ()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	c.logDiag("pkce_browser_consent start script=%s timeout=%s", script, to)
+	c.logDiag("pkce_browser_consent start bin=%s script=%s mode=%s timeout=%s parent=%s", bin, script, mode, to, parentTO)
 	err := cmd.Run()
 	out, errText := stdout.String(), strings.TrimSpace(stderr.String())
 	if err != nil {
@@ -250,7 +261,12 @@ func (c *Client) browserConsent(ctx context.Context, consentURL, cookie, wantSta
 		if res, perr := parseConsentScriptOutput(out); perr == nil && !res.OK {
 			return "", fmt.Errorf("pkce_browser_consent: %s", res.Error)
 		}
-		return "", fmt.Errorf("pkce_browser_consent: %v (%s)", err, trimDiag(errText, 200))
+		// signal: killed on VPS is often OOM or missing xvfb → headless Chrome hang/kill
+		msg := fmt.Sprintf("pkce_browser_consent: %v (%s)", err, trimDiag(errText, 200))
+		if strings.Contains(err.Error(), "killed") || strings.Contains(errText, "no DISPLAY") {
+			msg += "; VPS tip: apt install -y xvfb && ensure xvfb-run is on PATH (headed offscreen under virtual display)"
+		}
+		return "", fmt.Errorf("%s", msg)
 	}
 	res, err := parseConsentScriptOutput(out)
 	if err != nil {
@@ -271,4 +287,33 @@ func trimDiag(s string, n int) string {
 		return s[:n] + "…"
 	}
 	return s
+}
+
+// maybeXvfbConsent wraps python with xvfb-run when offscreen is requested and
+// there is no DISPLAY — same approach as Turnstile on headless VPS.
+func maybeXvfbConsent(python string, args []string, mode string) (string, []string) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" || mode == "auto" {
+		mode = "offscreen"
+	}
+	if mode == "headless" {
+		return python, args
+	}
+	if strings.TrimSpace(os.Getenv("DISPLAY")) != "" || strings.TrimSpace(os.Getenv("WAYLAND_DISPLAY")) != "" {
+		return python, args
+	}
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("GROK_OAUTH_NO_XVFB")))
+	if v == "" {
+		v = strings.ToLower(strings.TrimSpace(os.Getenv("GROK_TURNSTILE_NO_XVFB")))
+	}
+	if v == "1" || v == "true" || v == "yes" {
+		return python, args
+	}
+	xvfb, err := exec.LookPath("xvfb-run")
+	if err != nil {
+		return python, args
+	}
+	out := []string{"-a", python}
+	out = append(out, args...)
+	return xvfb, out
 }

@@ -86,6 +86,11 @@ def has_display() -> bool:
 
 
 def resolve_launch_mode(mode: str) -> tuple[str, bool]:
+    """offscreen = headed Chromium (needs DISPLAY or xvfb-run from Go bridge).
+
+    On bare VPS without DISPLAY, fall back to headless so launch still works;
+    prefer: apt install xvfb, then Go wraps with xvfb-run -a (sets DISPLAY).
+    """
     mode = (mode or "offscreen").strip().lower()
     if mode in ("", "auto"):
         mode = "offscreen"
@@ -94,21 +99,34 @@ def resolve_launch_mode(mode: str) -> tuple[str, bool]:
     if has_display() or sys.platform.startswith("win"):
         return "offscreen", False
     print(
-        "no DISPLAY; falling back to headless for oauth consent",
+        "no DISPLAY; falling back to headless for oauth consent. "
+        "On VPS install xvfb and re-run (Go uses xvfb-run -a when available): "
+        "apt-get install -y xvfb",
         file=sys.stderr,
     )
     return "headless", True
 
 
 def launch_args(label: str) -> list[str]:
+    # VPS / root / Docker: --no-sandbox and disable-dev-shm-usage are required
+    # or Chromium is often signal:killed (OOM / sandbox) with empty stdout.
     args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
         "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-infobars",
         "--disable-dev-shm-usage",
+        "--disable-gpu",
     ]
-    if label == "offscreen" and not sys.platform.startswith("win"):
-        args.extend(["--window-position=2400,2400", "--window-size=1280,900"])
+    if label == "offscreen":
+        args.extend(
+            [
+                "--window-position=-32000,-32000",
+                "--window-size=1280,900",
+            ]
+        )
     return args
 
 

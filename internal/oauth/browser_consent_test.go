@@ -75,6 +75,31 @@ func TestFindConsentScriptBesideTurnstile(t *testing.T) {
 	}
 }
 
+func TestMaybeXvfbConsentWrapsWhenNoDisplay(t *testing.T) {
+	t.Setenv("DISPLAY", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("GROK_OAUTH_NO_XVFB", "")
+	t.Setenv("GROK_TURNSTILE_NO_XVFB", "")
+	// If xvfb-run is not on this machine, function returns python unchanged — still OK.
+	bin, args := maybeXvfbConsent("python3", []string{"script.py", "--x"}, "offscreen")
+	if bin == "python3" {
+		if len(args) != 2 || args[0] != "script.py" {
+			t.Fatalf("no-xvfb path args=%v", args)
+		}
+		return
+	}
+	if len(args) < 3 || args[0] != "-a" || args[1] != "python3" {
+		t.Fatalf("xvfb wrap bin=%s args=%v", bin, args)
+	}
+}
+
+func TestMaybeXvfbConsentSkipsHeadless(t *testing.T) {
+	bin, args := maybeXvfbConsent("python3", []string{"s.py"}, "headless")
+	if bin != "python3" || len(args) != 1 {
+		t.Fatalf("headless must not wrap: %s %v", bin, args)
+	}
+}
+
 func TestBrowserConsentUsesRunner(t *testing.T) {
 	c := &Client{
 		consentTimeout: 5 * time.Second,
