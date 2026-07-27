@@ -772,6 +772,9 @@ merge_upgrade_keys() {
   env_set_key_if_missing "$dest" "TURNSTILE_MODE" "offscreen"
   env_set_key_if_missing "$dest" "OAUTH_MIN_INTERVAL_SEC" "6"
   env_set_key_if_missing "$dest" "OAUTH_RETRY_SEC" "60"
+  env_set_key_if_missing "$dest" "OAUTH_CONSENT_MODE" "auto"
+  env_set_key_if_missing "$dest" "OAUTH_CONSENT_TIMEOUT_SEC" "60"
+  env_set_key_if_missing "$dest" "OAUTH_CONSENT_CONCURRENCY" "1"
   env_set_key_if_missing "$dest" "PROBE_WARMUP_SEC" "5"
   if [ -n "${INSTALL_DIR:-}" ] && [ -d "$INSTALL_DIR/clearance" ]; then
     env_set_key_if_missing "$dest" "CLEARANCE_COMPOSE_DIR" "$INSTALL_DIR/clearance"
