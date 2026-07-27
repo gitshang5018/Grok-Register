@@ -728,18 +728,72 @@ func isPlausibleActionID(id string) bool {
 	return true
 }
 
+// actionBody is one candidate Server Action request body.
+type actionBody struct {
+	kind    string // "json" | "multipart"
+	payload string
+	ctype   string
+	label   string
+}
+
 // encodeServerActionBodies builds React encodeReply-compatible argument bodies
-// for a given action id. 0-arg actions MUST receive "[]" — a full consent
-// object is stripped by omitUnusedArgs and the call becomes a no-op re-render.
+// for a given action id. 0-arg actions MUST receive "[]".
+//
+// 1-arg consent actions observed in the wild take either a plain "allow"
+// string or a FormData of the hidden form fields — NOT a free-form JSON object
+// of camelCase keys (that shape only re-renders the page: 200, no redirect).
 func encodeServerActionBodies(actionID string, form url.Values) []string {
+	var out []string
+	for _, b := range encodeServerActionBodyList(actionID, form) {
+		if b.kind == "multipart" {
+			out = append(out, "multipart:"+b.payload)
+		} else {
+			out = append(out, b.payload)
+		}
+	}
+	return out
+}
+
+func encodeServerActionBodyList(actionID string, form url.Values) []actionBody {
 	meta := actionIDMeta(actionID)
 	if meta.UseCache {
 		return nil
 	}
 	if meta.ArgCount == 0 {
-		return []string{"[]"}
+		return []actionBody{{kind: "json", payload: "[]", ctype: "text/plain;charset=UTF-8", label: "empty-args"}}
 	}
 
+	var out []actionBody
+	addJSON := func(label string, v any) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return
+		}
+		s := string(b)
+		for _, existing := range out {
+			if existing.kind == "json" && existing.payload == s {
+				return
+			}
+		}
+		out = append(out, actionBody{kind: "json", payload: s, ctype: "text/plain;charset=UTF-8", label: label})
+	}
+
+	// 1) Most likely for type=button Allow: submitOAuth2Consent("allow")
+	addJSON("allow-string", []any{"allow"})
+	addJSON("approve-string", []any{"approve"})
+	addJSON("true-bool", []any{true})
+
+	// 2) FormData of the hidden consent fields.
+	if mp, boundary, err := buildConsentMultipart(form); err == nil {
+		out = append(out, actionBody{
+			kind:    "multipart",
+			payload: mp,
+			ctype:   "multipart/form-data; boundary=" + boundary,
+			label:   "formdata",
+		})
+	}
+
+	// 3) Structured object variants (last resorts; previously produced 510B no-ops).
 	camel := rscConsentPayload{
 		Action:              firstNonEmpty(form.Get("action"), "allow"),
 		ClientID:            form.Get("client_id"),
@@ -766,28 +820,54 @@ func encodeServerActionBodies(actionID string, form url.Values) []string {
 		"principal_id":          camel.PrincipalID,
 		"referrer":              camel.Referrer,
 	}
-
-	var out []string
-	add := func(v any) {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return
-		}
-		s := string(b)
-		for _, existing := range out {
-			if existing == s {
-				return
-			}
-		}
-		out = append(out, s)
-	}
-	// encodeReply wraps the function argument list as a JSON array.
-	add([]any{camel})
-	add([]any{snake})
-	// Some builds call with the object as the sole top-level value (rare).
-	add(camel)
-	add(snake)
+	addJSON("camel-obj", []any{camel})
+	addJSON("snake-obj", []any{snake})
 	return out
+}
+
+func buildConsentMultipart(form url.Values) (body, boundary string, err error) {
+	boundary = "----WebKitFormBoundary" + hex.EncodeToString(mustRand(8))
+	var b strings.Builder
+	keys := []string{
+		"action", "client_id", "code_challenge", "code_challenge_method",
+		"nonce", "principal_id", "principal_type", "redirect_uri", "referrer",
+		"scope", "state",
+	}
+	seen := map[string]bool{}
+	writeField := func(k, v string) {
+		seen[k] = true
+		fmt.Fprintf(&b, "--%s\r\n", boundary)
+		fmt.Fprintf(&b, "Content-Disposition: form-data; name=%q\r\n\r\n", k)
+		b.WriteString(v)
+		b.WriteString("\r\n")
+	}
+	for _, k := range keys {
+		if form.Has(k) {
+			writeField(k, form.Get(k))
+		} else if k == "action" {
+			writeField("action", "allow")
+		}
+	}
+	if !seen["action"] {
+		writeField("action", firstNonEmpty(form.Get("action"), "allow"))
+	}
+	for k := range form {
+		if !seen[k] {
+			writeField(k, form.Get(k))
+		}
+	}
+	fmt.Fprintf(&b, "--%s--\r\n", boundary)
+	return b.String(), boundary, nil
+}
+
+func mustRand(n int) []byte {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		for i := range b {
+			b[i] = byte(time.Now().UnixNano() >> (i * 3))
+		}
+	}
+	return b
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -799,26 +879,85 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// parseFlightRows splits a Next.js RSC flight body into id → raw payload.
+func parseFlightRows(body string) map[string]string {
+	rows := map[string]string{}
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		i := strings.IndexByte(line, ':')
+		if i <= 0 {
+			continue
+		}
+		id, payload := line[:i], line[i+1:]
+		if _, err := strconv.Atoi(id); err != nil {
+			continue
+		}
+		rows[id] = payload
+	}
+	return rows
+}
+
+// parseFlightActionResult resolves the Server Action return value from an RSC
+// flight body. Envelope row 0 is typically {"a":"$@1",…}; the real value lives
+// in the referenced row (often row 1).
+func parseFlightActionResult(body string) string {
+	rows := parseFlightRows(body)
+	if len(rows) == 0 {
+		return ""
+	}
+	if env, ok := rows["0"]; ok {
+		var meta struct {
+			A string `json:"a"`
+		}
+		if json.Unmarshal([]byte(env), &meta) == nil && strings.HasPrefix(meta.A, "$@") {
+			ref := strings.TrimPrefix(meta.A, "$@")
+			if v, ok := rows[ref]; ok {
+				return strings.TrimSpace(v)
+			}
+		}
+		if meta.A != "" && !strings.HasPrefix(meta.A, "$") {
+			return meta.A
+		}
+	}
+	if v, ok := rows["1"]; ok {
+		return strings.TrimSpace(v)
+	}
+	bestID, bestVal := -1, ""
+	for id, v := range rows {
+		n, err := strconv.Atoi(id)
+		if err != nil || n == 0 {
+			continue
+		}
+		if n > bestID {
+			bestID, bestVal = n, v
+		}
+	}
+	return strings.TrimSpace(bestVal)
+}
+
 // extractCodeFromActionBody pulls an authorization code out of a Next.js
 // Server Action RSC / plain response body.
 func extractCodeFromActionBody(body, redirectURI, state string) string {
 	if strings.TrimSpace(body) == "" {
 		return ""
 	}
-	// Direct JSON / query shapes.
-	if m := rxCodeJSON.FindStringSubmatch(body); len(m) > 1 {
-		return fmt.Sprintf("%s?code=%s&state=%s", redirectURI, m[1], state)
-	}
-	if m := rxCodeQuery.FindStringSubmatch(body); len(m) > 1 {
-		// Prefer a full callback URL if present in the body.
-		if u := findCallbackURL(body); u != "" {
+	result := parseFlightActionResult(body)
+	for _, src := range []string{result, body} {
+		if src == "" {
+			continue
+		}
+		if m := rxCodeJSON.FindStringSubmatch(src); len(m) > 1 {
+			return fmt.Sprintf("%s?code=%s&state=%s", redirectURI, m[1], state)
+		}
+		if u := findCallbackURL(src); u != "" {
 			return u
 		}
-		return fmt.Sprintf("%s?code=%s&state=%s", redirectURI, m[1], state)
-	}
-	// RSC flight lines: N:"http://…/callback?code=…"
-	if u := findCallbackURL(body); u != "" {
-		return u
+		if m := rxCodeQuery.FindStringSubmatch(src); len(m) > 1 {
+			return fmt.Sprintf("%s?code=%s&state=%s", redirectURI, m[1], state)
+		}
 	}
 	return ""
 }
@@ -826,14 +965,12 @@ func extractCodeFromActionBody(body, redirectURI, state string) string {
 var rxCallbackURL = regexp.MustCompile(`https?://[^"'\s\\]+(?:callback|/oauth)[^"'\s\\]*code=[A-Za-z0-9._~\-]+[^"'\s\\]*`)
 
 func findCallbackURL(body string) string {
-	// Unescape common RSC / JSON escapes so the regex can see a plain URL.
 	unesc := strings.ReplaceAll(body, `\u0026`, "&")
 	unesc = strings.ReplaceAll(unesc, `\/`, `/`)
 	unesc = strings.ReplaceAll(unesc, `\\u0026`, "&")
 	if m := rxCallbackURL.FindString(unesc); m != "" {
 		return m
 	}
-	// Quoted absolute URL containing code=
 	rxQuoted := regexp.MustCompile(`"(https?://[^"]*code=[^"]+)"`)
 	if m := rxQuoted.FindStringSubmatch(unesc); len(m) > 1 {
 		return strings.ReplaceAll(m[1], `\u0026`, "&")
@@ -850,6 +987,15 @@ func bodyPreview(s string, n int) string {
 	return s
 }
 
+func bodyTailPreview(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", "")
+	if len(s) > n {
+		return "…" + s[len(s)-n:]
+	}
+	return s
+}
+
 func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html, cookie string, form url.Values) (string, string, bool) {
 	actionIDs := discoverConsentActionIDs(ctx, c, consentURL, html)
 	c.logDiag("pkce_consent discovered %d server action IDs: %v", len(actionIDs), actionIDs)
@@ -857,7 +1003,6 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 		return "", cookie, false
 	}
 
-	// Browser posts to the current document URL, query included.
 	submitURL := serverActionSubmitURL(consentURL)
 	origin := "https://accounts.x.ai"
 	if u, err := url.Parse(consentURL); err == nil && u.Host != "" {
@@ -867,7 +1012,7 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 	routerTree := "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22oauth2%22%2C%7B%22children%22%3A%5B%22consent%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D%7D%5D%7D%5D%7D%5D%7D%2C%22%24undefined%22%2C%22%24undefined%22%2C16%5D"
 
 	for _, actionID := range actionIDs {
-		bodies := encodeServerActionBodies(actionID, form)
+		bodies := encodeServerActionBodyList(actionID, form)
 		if len(bodies) == 0 {
 			continue
 		}
@@ -878,14 +1023,14 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 		}
 		c.logDiag("pkce server action %s meta useCache=%v args=%d bodies=%d", tag, meta.UseCache, meta.ArgCount, len(bodies))
 
-		for bi, bodyText := range bodies {
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, submitURL, strings.NewReader(bodyText))
+		for bi, ab := range bodies {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, submitURL, strings.NewReader(ab.payload))
 			if err != nil {
 				continue
 			}
 			req.Header.Set("User-Agent", c.ua)
 			req.Header.Set("Accept", "text/x-component")
-			req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+			req.Header.Set("Content-Type", ab.ctype)
 			req.Header.Set("Next-Action", actionID)
 			req.Header.Set("Next-Router-State-Tree", routerTree)
 			req.Header.Set("Origin", origin)
@@ -897,7 +1042,7 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 
 			resp, err := c.http.Do(req)
 			if err != nil {
-				c.logDiag("pkce server action %s body#%d HTTP error: %v", tag, bi, err)
+				c.logDiag("pkce server action %s body#%d(%s) HTTP error: %v", tag, bi, ab.label, err)
 				continue
 			}
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -911,33 +1056,31 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 				xar = resp.Header.Get("x-action-redirect")
 			}
 			loc := actionRedirectFromHTTP(origin, resp.Header, rawLoc)
-			// x-action-redirect may be "url;push" — strip the type suffix.
 			if i := strings.IndexByte(loc, ';'); i >= 0 {
 				loc = loc[:i]
 			}
-			c.logDiag("pkce server action %s body#%d status=%d loc=%q x-action-redirect=%q bodyLen=%d preview=%q",
-				tag, bi, resp.StatusCode, trimLoc(rawLoc), trimLoc(xar), len(body), bodyPreview(bodyStr, 180))
+			actionResult := parseFlightActionResult(bodyStr)
+			c.logDiag("pkce server action %s body#%d(%s) status=%d loc=%q x-action-redirect=%q bodyLen=%d result=%q tail=%q",
+				tag, bi, ab.label, resp.StatusCode, trimLoc(rawLoc), trimLoc(xar), len(body),
+				bodyPreview(actionResult, 160), bodyTailPreview(bodyStr, 160))
 
 			if strings.Contains(loc, "code=") {
 				return loc, cookie, true
 			}
-			// A callback with error=… is a definitive answer for this body —
-			// try the next body/id rather than treating it as success.
 			if isCallback(loc) {
-				c.logDiag("pkce server action %s body#%d callback without code: %q", tag, bi, trimLoc(loc))
+				c.logDiag("pkce server action %s body#%d(%s) callback without code: %q", tag, bi, ab.label, trimLoc(loc))
 				continue
 			}
 
 			if synth := extractCodeFromActionBody(bodyStr, form.Get("redirect_uri"), form.Get("state")); synth != "" {
-				c.logDiag("pkce server action %s body#%d extracted code from body", tag, bi)
+				c.logDiag("pkce server action %s body#%d(%s) extracted code from body", tag, bi, ab.label)
 				return synth, cookie, true
 			}
 
 			if resp.StatusCode == 404 ||
 				resp.Header.Get("x-action-not-found") == "1" ||
-				resp.Header.Get("X-Action-Not-Found") == "1" ||
-				strings.Contains(strings.ToLower(bodyStr), "access denied") {
-				break // try next action id
+				resp.Header.Get("X-Action-Not-Found") == "1" {
+				break
 			}
 		}
 	}
