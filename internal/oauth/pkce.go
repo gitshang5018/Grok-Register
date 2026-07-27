@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"sort"
 	"strings"
+	"time"
 
 	http "github.com/bogdanfinn/fhttp"
 )
@@ -263,6 +266,24 @@ func (c *Client) authorizeCode(ctx context.Context, sso string, sess pkceSession
 // scraping the device flow uses. Returns the response Location and cookie jar.
 func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie string) (string, string, error) {
 	fields, action := parseHTMLFormFields(html)
+	// The authorize-flow consent form is a different component from the device
+	// one, so log what was actually scraped: a denial caused by a field we never
+	// sent is otherwise indistinguishable from an account-level refusal.
+	names := make([]string, 0, len(fields))
+	for k, vs := range fields {
+		filled := len(vs) > 0 && vs[0] != ""
+		names = append(names, fmt.Sprintf("%s=%t", k, filled))
+	}
+	sort.Strings(names)
+	c.logDiag("pkce_consent_form action=%q fields[%s]", trimLoc(action), strings.Join(names, ","))
+	if os.Getenv("GROK_OAUTH_DEBUG_HTML") == "1" {
+		name := fmt.Sprintf("pkce_consent_%d.html", time.Now().UnixNano())
+		if werr := os.WriteFile(name, []byte(html), 0o600); werr != nil {
+			c.logDiag("pkce consent dump failed: %v", werr)
+		} else {
+			c.logDiag("pkce consent page dumped to %s", name)
+		}
+	}
 	if action == "" {
 		return "", cookie, fmt.Errorf("pkce_consent_form_missing")
 	}

@@ -79,6 +79,9 @@ type Engine struct {
 	// consuming mailboxes, Turnstile solves and Castle mints forever.
 	oauthConsecFail atomic.Int64
 
+	// Guards against one account being recorded with another's session token.
+	seenSSO sync.Map
+
 	// Global OAuth pacing (shared by all oauth workers) — avoids dual-worker rate_limited.
 	oauthGateMu    sync.Mutex
 	oauthLastStart time.Time
@@ -826,9 +829,31 @@ func (e *Engine) pWorker(ctx context.Context, id int) {
 	}
 }
 
+// newSignupClient builds a protocol client for a single register worker.
+//
+// The signup chain writes session cookies and then reads them back — including a
+// fallback that scrapes `sso` out of the cookie jar. On one shared client that
+// jar is shared, so a worker whose own response carried no sso could pick up the
+// token another worker had just minted and file it under the wrong email. Two
+// accounts then end up recorded with byte-identical SSO tokens, and every
+// downstream OAuth authorizes the wrong session.
+func (e *Engine) newSignupClient() (*protocol.Client, error) {
+	return protocol.NewClientOpts(protocol.ClientOptions{
+		Proxy:               e.opt.Cfg.RegisterProxy,
+		Clearance:           e.cm,
+		Impersonate:         e.xai.Profile(),
+		ImpersonateFallback: protocol.FallbackProfiles(e.opt.Cfg.CFImpersonateFallback),
+	})
+}
+
 func (e *Engine) cWorker(ctx context.Context, id int, scfg protocol.SignupConfig) {
 	defer e.wgReg.Done()
 	log := e.opt.Log
+	xai, err := e.newSignupClient()
+	if err != nil {
+		log.Warnf("[C%d] 独立 signup client 创建失败，退回共享 client（SSO 可能串号）: %v", id, err)
+		xai = e.xai
+	}
 	for {
 		if int(e.done.Load()) >= e.opt.Target {
 			return
@@ -845,8 +870,8 @@ func (e *Engine) cWorker(ctx context.Context, id int, scfg protocol.SignupConfig
 		})
 		log.Startf("开始注册 %s", q.Email)
 
-		e.xai.ClearAuthCookies()
-		if err := e.xai.VerifyEmailCode(q.Email, q.Code); err != nil {
+		xai.ClearAuthCookies()
+		if err := xai.VerifyEmailCode(q.Email, q.Code); err != nil {
 			log.Warnf("verify fail %s code=%s: %v", q.Email, protocol.CodeOf(err), err)
 			pair.Release()
 			e.fail.Add(1)
@@ -854,7 +879,7 @@ func (e *Engine) cWorker(ctx context.Context, id int, scfg protocol.SignupConfig
 			continue
 		}
 		// Optional ValidatePassword (document field 4/5); non-fatal
-		if err := e.xai.ValidatePassword(q.Email, q.Password); err != nil {
+		if err := xai.ValidatePassword(q.Email, q.Password); err != nil {
 			log.Debugf("validate_password skip/fail %s: %v", q.Email, err)
 		}
 		// Castle: fresh token for createUser (frontend mints again at submit).
@@ -868,11 +893,22 @@ func (e *Engine) cWorker(ctx context.Context, id int, scfg protocol.SignupConfig
 			continue
 		}
 		body := protocol.BuildSignupBodyCastle(q.Email, q.Password, q.Code, token, castleTok)
-		text, sso, err := e.xai.SignupServerAction(body, scfg.ActionID, scfg.StateTree)
+		text, sso, err := xai.SignupServerAction(body, scfg.ActionID, scfg.StateTree)
 		if sso == "" {
 			sso = protocol.ExtractSSOFromText(text)
 		}
 		pair.Release()
+		// A session token that already belongs to another account in this run means
+		// the signup picked up someone else's cookie. Recording it would pair this
+		// email with the wrong session and guarantee the OAuth refusal downstream.
+		if sso != "" {
+			if prev, dup := e.seenSSO.LoadOrStore(sso, q.Email); dup {
+				log.Warnf("SSO 串号：%s 拿到了 %v 的会话，丢弃本次注册", q.Email, prev)
+				e.fail.Add(1)
+				e.releaseReserve()
+				continue
+			}
+		}
 		if err != nil || sso == "" {
 			preview := text
 			if len(preview) > 180 {
