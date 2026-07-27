@@ -48,9 +48,30 @@ func TestFindConsentScriptEnvOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GROK_OAUTH_CONSENT_SCRIPT", p)
+	t.Setenv("GROK_TURNSTILE_SCRIPT", "")
 	got := findConsentScript()
-	if got != p {
-		t.Fatalf("got %q want %q", got, p)
+	abs, _ := filepath.Abs(p)
+	if got != p && got != abs {
+		t.Fatalf("got %q want %q or %q", got, p, abs)
+	}
+}
+
+func TestFindConsentScriptBesideTurnstile(t *testing.T) {
+	dir := t.TempDir()
+	mint := filepath.Join(dir, "turnstile_mint.py")
+	consent := filepath.Join(dir, "oauth_consent.py")
+	if err := os.WriteFile(mint, []byte("#"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(consent, []byte("#"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_OAUTH_CONSENT_SCRIPT", "")
+	t.Setenv("GROK_TURNSTILE_SCRIPT", mint)
+	got := findConsentScript()
+	abs, _ := filepath.Abs(consent)
+	if got != consent && got != abs {
+		t.Fatalf("got %q want beside turnstile %q", got, consent)
 	}
 }
 

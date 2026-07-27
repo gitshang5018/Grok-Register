@@ -55,26 +55,51 @@ func parseConsentScriptOutput(stdout string) (consentScriptResult, error) {
 func findConsentScript() string {
 	if p := strings.TrimSpace(os.Getenv("GROK_OAUTH_CONSENT_SCRIPT")); p != "" {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			if abs, e := filepath.Abs(p); e == nil {
+				return abs
+			}
 			return p
 		}
 	}
 	var candidates []string
+	// Same share dir as Turnstile mint (common when only GROK_TURNSTILE_SCRIPT is set).
+	if ts := strings.TrimSpace(os.Getenv("GROK_TURNSTILE_SCRIPT")); ts != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(ts), "oauth_consent.py"))
+	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(dir, "scripts", "oauth_consent.py"),
 			filepath.Join(dir, "oauth_consent.py"),
 			filepath.Join(dir, "..", "scripts", "oauth_consent.py"),
+			filepath.Join(dir, "..", "Grok-Register", "scripts", "oauth_consent.py"),
+			filepath.Join(dir, "..", "share", "grok-reg", "oauth_consent.py"),
+			filepath.Join(dir, "..", "local", "share", "grok-reg", "oauth_consent.py"),
 		)
 	}
 	if wd, err := os.Getwd(); err == nil {
 		candidates = append(candidates,
 			filepath.Join(wd, "scripts", "oauth_consent.py"),
-			filepath.Join(wd, "..", "scripts", "oauth_consent.py"),
+			filepath.Join(wd, "Grok-Register", "scripts", "oauth_consent.py"),
 		)
 	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".local", "share", "grok-reg", "oauth_consent.py"),
+			filepath.Join(home, "Grok-Register", "scripts", "oauth_consent.py"),
+		)
+	}
+	// Default install.sh SHARE_DIR / INSTALL_DIR layouts
+	candidates = append(candidates,
+		"/usr/local/share/grok-reg/oauth_consent.py",
+		"/opt/Grok-Register/scripts/oauth_consent.py",
+		"/opt/Grok-Reg/scripts/oauth_consent.py",
+	)
 	for _, p := range candidates {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			if abs, e := filepath.Abs(p); e == nil {
+				return abs
+			}
 			return p
 		}
 	}
@@ -82,12 +107,19 @@ func findConsentScript() string {
 }
 
 func findConsentPython() string {
-	for _, name := range []string{
-		os.Getenv("GROK_PYTHON"),
+	var names []string
+	if p := strings.TrimSpace(os.Getenv("GROK_PYTHON")); p != "" {
+		names = append(names, p)
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		names = append(names, filepath.Join(home, ".local", "share", "cloakbrowser-venv", "bin", "python"))
+	}
+	names = append(names,
 		"/opt/cloakbrowser-venv/bin/python",
 		"python3",
 		"python",
-	} {
+	)
+	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
