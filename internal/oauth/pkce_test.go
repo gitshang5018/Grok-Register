@@ -237,6 +237,97 @@ func TestServerActionSubmitURLKeepsQuery(t *testing.T) {
 	}
 }
 
+// Next.js packs type + usedArgs into the first byte of a 42-char action id.
+// Live consent logs showed 00… (0-arg action), 40… (1-arg action) and de…
+// (use-cache — must never be POSTed as Next-Action).
+func TestActionIDMetaFromPrefix(t *testing.T) {
+	cases := []struct {
+		id       string
+		useCache bool
+		nArgs    int
+	}{
+		{"0091b719fc9316041607cb1c3c32378f27284e75e2", false, 0},
+		{"404c516617e9e389641add4bd711e454c0f2d49f5d", false, 1},
+		{"de2ae688129f7c7c4d157a3325c2069a31c20eed", true, 0},
+	}
+	for _, tc := range cases {
+		meta := actionIDMeta(tc.id)
+		if meta.UseCache != tc.useCache {
+			t.Fatalf("id=%s UseCache=%v want %v", tc.id[:16], meta.UseCache, tc.useCache)
+		}
+		if !tc.useCache && meta.ArgCount != tc.nArgs {
+			t.Fatalf("id=%s ArgCount=%d want %d", tc.id[:16], meta.ArgCount, tc.nArgs)
+		}
+	}
+}
+
+func TestRankActionIDsDropsUseCacheAndPrefersConsentLinked(t *testing.T) {
+	// de… is use-cache; 40… is 1-arg consent; 00… is 0-arg unrelated.
+	ids := []string{
+		"de2ae688129f7c7c4d157a3325c2069a31c20eed",
+		"0091b719fc9316041607cb1c3c32378f27284e75e2",
+		"404c516617e9e389641add4bd711e454c0f2d49f5d",
+	}
+	linked := map[string]bool{
+		"404c516617e9e389641add4bd711e454c0f2d49f5d": true,
+	}
+	got := rankActionIDs(ids, linked)
+	if len(got) != 2 {
+		t.Fatalf("expected use-cache dropped, got %v", got)
+	}
+	if got[0] != "404c516617e9e389641add4bd711e454c0f2d49f5d" {
+		t.Fatalf("consent-linked 1-arg should be first, got %v", got)
+	}
+}
+
+// encodeReply for a 0-arg server action is an empty JSON array. Sending a
+// full consent object against a 0-arg id is ignored by omitUnusedArgs and the
+// action becomes a no-op re-render (200, no x-action-redirect) — exactly the
+// live failure mode after 42-char discovery started working.
+func TestEncodeServerActionBodiesZeroAndOneArg(t *testing.T) {
+	form := url.Values{}
+	form.Set("action", "allow")
+	form.Set("client_id", "CID")
+	form.Set("redirect_uri", "http://127.0.0.1/callback")
+	form.Set("scope", "openid")
+	form.Set("state", "ST")
+	form.Set("code_challenge", "CH")
+	form.Set("code_challenge_method", "S256")
+	form.Set("nonce", "N")
+	form.Set("principal_type", "User")
+	form.Set("principal_id", "")
+	form.Set("referrer", "")
+
+	zero := encodeServerActionBodies("0091b719fc9316041607cb1c3c32378f27284e75e2", form)
+	if len(zero) != 1 || zero[0] != "[]" {
+		t.Fatalf("0-arg bodies = %#v, want [\"[]\"]", zero)
+	}
+
+	one := encodeServerActionBodies("404c516617e9e389641add4bd711e454c0f2d49f5d", form)
+	if len(one) < 1 {
+		t.Fatal("1-arg produced no bodies")
+	}
+	// At least one variant must carry the allow action + client id.
+	found := false
+	for _, b := range one {
+		if strings.Contains(b, "allow") && (strings.Contains(b, "CID") || strings.Contains(b, "client")) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("1-arg bodies missing consent fields: %v", one)
+	}
+}
+
+func TestExtractCodeFromActionBodyRSC(t *testing.T) {
+	body := "0:{\"a\":\"$@1\",\"f\":[],\"b\":\"dev\"}\n1:\"http://127.0.0.1:56121/callback?code=THECODE&state=ST\"\n"
+	loc := extractCodeFromActionBody(body, "http://127.0.0.1/callback", "ST")
+	if !strings.Contains(loc, "code=THECODE") {
+		t.Fatalf("RSC action result URL not extracted: %q", loc)
+	}
+}
+
 func TestResolveURL(t *testing.T) {
 	base := "https://accounts.x.ai/oauth2/consent?response_type=code&client_id=b1a00492"
 	got := resolveURL(base, "/_next/static/chunks/073qnqzc81yfr.js")
