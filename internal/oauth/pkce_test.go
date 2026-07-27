@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"net/url"
@@ -127,5 +128,24 @@ func TestIsConsentPage(t *testing.T) {
 	}
 	if isConsentPage("https://accounts.x.ai/account") {
 		t.Fatal("account page misread as consent")
+	}
+}
+
+func TestDiscoverConsentActionIDs(t *testing.T) {
+	html := `<html><body><script>self.__next_f.push([1, "createServerReference)(\"1234567890abcdef1234567890abcdef12345678\", submitOAuth2Consent)"])</script></body></html>`
+	c := &Client{}
+	ids := discoverConsentActionIDs(context.Background(), c, "https://accounts.x.ai/oauth2/consent", html)
+	if len(ids) == 0 {
+		t.Fatal("expected discovered action IDs, got none")
+	}
+	found := false
+	for _, id := range ids {
+		if id == "1234567890abcdef1234567890abcdef12345678" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected 1234567890abcdef1234567890abcdef12345678 in discovered IDs: %v", ids)
 	}
 }

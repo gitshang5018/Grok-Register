@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -323,6 +324,14 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	}
 	c.logDiag("pkce_consent page identity userId=%s", orDash(extractPrincipalID(html)))
 
+	// Next.js App Router / RSC Server Action consent path (accounts.x.ai modern consent).
+	// Try Server Action submitOAuth2Consent first.
+	if saLoc, saCookie, ok := submitServerActionConsent(ctx, c, consentURL, html, cookie, form); ok {
+		c.logDiag("pkce_consent Server Action succeeded: loc=%q", trimLoc(saLoc))
+		return saLoc, saCookie, nil
+	}
+	c.logDiag("pkce_consent Server Action did not yield code -> fallback to form POST")
+
 	action := target.Action
 	// A button may override the form's action attribute.
 	for _, b := range target.Buttons {
@@ -359,6 +368,184 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 		return "", cookie, fmt.Errorf("pkce_consent_denied")
 	}
 	return loc, cookie, nil
+}
+
+type rscConsentPayload struct {
+	Action              string `json:"action"`
+	ClientID            string `json:"clientId"`
+	RedirectURI         string `json:"redirectUri"`
+	Scope               string `json:"scope"`
+	State               string `json:"state"`
+	CodeChallenge       string `json:"codeChallenge"`
+	CodeChallengeMethod string `json:"codeChallengeMethod"`
+	Nonce               string `json:"nonce"`
+	PrincipalType       string `json:"principalType"`
+	PrincipalID         string `json:"principalId"`
+	Referrer            string `json:"referrer"`
+}
+
+var (
+	rxServerAction1 = regexp.MustCompile(`(?i)createServerReference\)\("([a-f0-9]{40,64})"[^)]*submitOAuth2Consent`)
+	rxServerAction2 = regexp.MustCompile(`(?i)(?:next-action|serverReference|actionId)[^a-f0-9]+([a-f0-9]{40,64})`)
+	rxServerAction3 = regexp.MustCompile(`(?i)([a-f0-9]{40,64}).{0,600}submitOAuth2Consent`)
+	rxServerAction4 = regexp.MustCompile(`(?i)submitOAuth2Consent.{0,600}([a-f0-9]{40,64})`)
+	rxServerAction5 = regexp.MustCompile(`(?i)createServerReference\)\("([a-f0-9]{40,64})"`)
+	rxScriptSrc     = regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']+)["']`)
+	rxCodeJSON      = regexp.MustCompile(`(?i)"code"\s*:\s*"([^"]+)"`)
+	rxCodeQuery     = regexp.MustCompile(`(?i)(?:[?&]|\\u0026)code=([A-Za-z0-9._~\-]+)`)
+)
+
+const defaultConsentActionID = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+
+func discoverConsentActionIDs(ctx context.Context, c *Client, consentURL, html string) []string {
+	var sources []string
+	sources = append(sources, html)
+
+	matches := rxScriptSrc.FindAllStringSubmatch(html, -1)
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		src := m[1]
+		if !strings.Contains(src, "chunk") && !strings.Contains(src, "app") && !strings.Contains(src, "consent") && !strings.Contains(src, "_next") {
+			continue
+		}
+		scriptURL := absURL(consentURL, src)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, scriptURL, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", c.ua)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		_ = resp.Body.Close()
+		if len(body) > 0 {
+			sources = append(sources, string(body))
+		}
+	}
+
+	combined := strings.Join(sources, "\n")
+	var ids []string
+	addID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		for _, existing := range ids {
+			if existing == id {
+				return
+			}
+		}
+		ids = append(ids, id)
+	}
+
+	for _, rx := range []*regexp.Regexp{rxServerAction1, rxServerAction2, rxServerAction3, rxServerAction4, rxServerAction5} {
+		for _, m := range rx.FindAllStringSubmatch(combined, -1) {
+			if len(m) > 1 {
+				addID(m[1])
+			}
+		}
+	}
+	addID(defaultConsentActionID)
+	return ids
+}
+
+func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html, cookie string, form url.Values) (string, string, bool) {
+	actionIDs := discoverConsentActionIDs(ctx, c, consentURL, html)
+	c.logDiag("pkce_consent discovered %d server action IDs: %v", len(actionIDs), actionIDs)
+	if len(actionIDs) == 0 {
+		return "", cookie, false
+	}
+
+	payload := []rscConsentPayload{{
+		Action:              "allow",
+		ClientID:            form.Get("client_id"),
+		RedirectURI:         form.Get("redirect_uri"),
+		Scope:               form.Get("scope"),
+		State:               form.Get("state"),
+		CodeChallenge:       form.Get("code_challenge"),
+		CodeChallengeMethod: form.Get("code_challenge_method"),
+		Nonce:               form.Get("nonce"),
+		PrincipalType:       "User",
+		PrincipalID:         "",
+		Referrer:            "",
+	}}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", cookie, false
+	}
+
+	submitURL := strings.Split(consentURL, "?")[0]
+	origin := "https://accounts.x.ai"
+	if u, err := url.Parse(consentURL); err == nil && u.Host != "" {
+		origin = u.Scheme + "://" + u.Host
+	}
+
+	routerTree := "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22oauth2%22%2C%7B%22children%22%3A%5B%22consent%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D%7D%5D%7D%5D%7D%5D%7D%2C%22%24undefined%22%2C%22%24undefined%22%2C16%5D"
+
+	for _, actionID := range actionIDs {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, submitURL, strings.NewReader(string(bodyBytes)))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", c.ua)
+		req.Header.Set("Accept", "text/x-component")
+		req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+		req.Header.Set("Next-Action", actionID)
+		req.Header.Set("Next-Router-State-Tree", routerTree)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", consentURL)
+		req.Header.Set("Cookie", sanitizeSessionCookies(cookie))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			tag := actionID
+			if len(tag) > 16 {
+				tag = tag[:16]
+			}
+			c.logDiag("pkce server action %s HTTP error: %v", tag, err)
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		cookie = mergeSetCookies(cookie, resp.Header)
+		bodyStr := string(body)
+
+		loc := resp.Header.Get("Location")
+		tag := actionID
+		if len(tag) > 16 {
+			tag = tag[:16]
+		}
+		c.logDiag("pkce server action %s status=%d loc=%q bodyLen=%d", tag, resp.StatusCode, trimLoc(loc), len(body))
+
+		if strings.Contains(loc, "code=") {
+			return loc, cookie, true
+		}
+
+		if m := rxCodeJSON.FindStringSubmatch(bodyStr); len(m) > 1 {
+			code := m[1]
+			synthLoc := fmt.Sprintf("%s?code=%s&state=%s", form.Get("redirect_uri"), code, form.Get("state"))
+			c.logDiag("pkce server action %s extracted code from JSON body", tag)
+			return synthLoc, cookie, true
+		}
+		if m := rxCodeQuery.FindStringSubmatch(bodyStr); len(m) > 1 {
+			code := m[1]
+			synthLoc := fmt.Sprintf("%s?code=%s&state=%s", form.Get("redirect_uri"), code, form.Get("state"))
+			c.logDiag("pkce server action %s extracted code from query body", tag)
+			return synthLoc, cookie, true
+		}
+
+		if resp.StatusCode == 404 || strings.Contains(strings.ToLower(bodyStr), "access denied") {
+			continue
+		}
+	}
+	return "", cookie, false
 }
 
 // exchangeCode redeems the authorization code. Per RFC 6749 this call carries no
