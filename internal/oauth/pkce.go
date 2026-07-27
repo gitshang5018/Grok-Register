@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -385,18 +386,29 @@ type rscConsentPayload struct {
 }
 
 var (
+	// Next.js SERVER_REFERENCE_ID_LENGTH is 42. Older builds used 40; accept
+	// the full production range so a length mismatch cannot silence discovery.
 	rxServerAction1 = regexp.MustCompile(`(?i)createServerReference\)?\([^"]*"([a-f0-9]{40,64})"`)
 	rxServerAction2 = regexp.MustCompile(`(?i)registerServerReference\([^"]*"([a-f0-9]{40,64})"`)
-	rxServerAction3 = regexp.MustCompile(`(?i)(?:next-action|serverReference|actionId|action_id)[^a-f0-9]+([a-f0-9]{40,64})`)
+	rxServerAction3 = regexp.MustCompile(`(?i)(?:next-action|serverReference|actionId|action_id|\$ACTION_ID_?)[^a-f0-9]+([a-f0-9]{40,64})`)
 	rxServerAction4 = regexp.MustCompile(`(?i)([a-f0-9]{40,64}).{0,1000}submitOAuth2Consent`)
 	rxServerAction5 = regexp.MustCompile(`(?i)submitOAuth2Consent.{0,1000}([a-f0-9]{40,64})`)
-	rxHex40         = regexp.MustCompile(`\b([a-f0-9]{40}|[a-f0-9]{64})\b`)
+	rxServerAction6 = regexp.MustCompile(`(?i)submitOAuth2Consent[^a-f0-9]{0,80}(?:id["']?\s*[:=]\s*["']?)([a-f0-9]{40,64})`)
+	rxHexActionID   = regexp.MustCompile(`(?i)(?:^|[^a-f0-9])([a-f0-9]{40,64})(?:[^a-f0-9]|$)`)
 	rxScriptSrc     = regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']+)["']`)
+	rxModulePreload = regexp.MustCompile(`(?i)<link[^>]+ rel=["'](?:modulepreload|preload)["'][^>]+href=["']([^"']+)["']|<link[^>]+href=["']([^"']+)["'][^>]+rel=["'](?:modulepreload|preload)["']`)
 	rxCodeJSON      = regexp.MustCompile(`(?i)"code"\s*:\s*"([^"]+)"`)
 	rxCodeQuery     = regexp.MustCompile(`(?i)(?:[?&]|\\u0026)code=([A-Za-z0-9._~\-]+)`)
 )
 
+// defaultConsentActionID is a last-resort 40-char id from an older build. Live
+// pages ship 42-char ids; this only runs when discovery finds nothing else.
 const defaultConsentActionID = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+
+// nextServerReferenceIDLen is packages/next SERVER_REFERENCE_ID_LENGTH.
+const nextServerReferenceIDLen = 42
+
+const maxConsentScriptFetches = 48
 
 func resolveURL(baseURL, ref string) string {
 	base, err := url.Parse(baseURL)
@@ -410,18 +422,174 @@ func resolveURL(baseURL, ref string) string {
 	return base.ResolveReference(refU).String()
 }
 
+// serverActionSubmitURL is the document URL the browser posts the Server Action
+// to. The full query string must be kept — it carries the OAuth request context.
+func serverActionSubmitURL(consentURL string) string {
+	return strings.TrimSpace(consentURL)
+}
+
+// actionRedirectLocation reads the redirect a Next.js Server Action produced.
+// Successful external redirects typically arrive as x-action-redirect rather
+// than Location when Accept is text/x-component.
+func actionRedirectLocation(origin string, headers map[string]string, fallbackLoc string) string {
+	for _, key := range []string{
+		"X-Action-Redirect", "x-action-redirect",
+		"X-Action-Redirect-Location", "x-action-redirect-location",
+	} {
+		if v := strings.TrimSpace(headers[key]); v != "" {
+			return absURL(origin, v)
+		}
+	}
+	if fallbackLoc != "" {
+		return fallbackLoc
+	}
+	return ""
+}
+
+func actionRedirectFromHTTP(origin string, h http.Header, fallbackLoc string) string {
+	headers := map[string]string{}
+	for _, key := range []string{
+		"Location",
+		"X-Action-Redirect", "x-action-redirect",
+		"X-Action-Redirect-Location", "x-action-redirect-location",
+	} {
+		if v := h.Get(key); v != "" {
+			headers[key] = v
+		}
+	}
+	if loc := actionRedirectLocation(origin, headers, ""); loc != "" {
+		return loc
+	}
+	return fallbackLoc
+}
+
+func scriptFetchPriority(src string) int {
+	low := strings.ToLower(src)
+	switch {
+	case strings.Contains(low, "consent"), strings.Contains(low, "oauth"):
+		return 0
+	case strings.Contains(low, "/app/"), strings.Contains(low, "page-"), strings.Contains(low, "page."):
+		return 1
+	case strings.Contains(low, "chunk"), strings.Contains(low, "_next"):
+		return 2
+	default:
+		return 3
+	}
+}
+
+func collectConsentAssetURLs(consentURL, html string) []string {
+	seen := map[string]struct{}{}
+	var ranked []struct {
+		pri int
+		u   string
+	}
+	add := func(ref string, pri int) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || strings.HasPrefix(ref, "data:") {
+			return
+		}
+		u := resolveURL(consentURL, ref)
+		if _, ok := seen[u]; ok {
+			return
+		}
+		seen[u] = struct{}{}
+		ranked = append(ranked, struct {
+			pri int
+			u   string
+		}{pri, u})
+	}
+	for _, m := range rxScriptSrc.FindAllStringSubmatch(html, -1) {
+		if len(m) > 1 {
+			add(m[1], scriptFetchPriority(m[1]))
+		}
+	}
+	for _, m := range rxModulePreload.FindAllStringSubmatch(html, -1) {
+		ref := ""
+		if len(m) > 1 && m[1] != "" {
+			ref = m[1]
+		} else if len(m) > 2 {
+			ref = m[2]
+		}
+		if ref != "" {
+			add(ref, scriptFetchPriority(ref))
+		}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return ranked[i].pri < ranked[j].pri
+	})
+	out := make([]string, 0, len(ranked))
+	for _, r := range ranked {
+		out = append(out, r.u)
+	}
+	return out
+}
+
+func rankActionIDs(ids []string) []string {
+	if len(ids) < 2 {
+		return ids
+	}
+	score := func(id string) int {
+		switch {
+		case len(id) == nextServerReferenceIDLen && id != defaultConsentActionID:
+			return 0
+		case id == defaultConsentActionID:
+			return 3
+		case len(id) == 40 || len(id) == 64:
+			return 2
+		default:
+			return 1
+		}
+	}
+	sort.SliceStable(ids, func(i, j int) bool {
+		si, sj := score(ids[i]), score(ids[j])
+		if si != sj {
+			return si < sj
+		}
+		return false
+	})
+	return ids
+}
+
+func extractActionIDsFromText(text string, addID func(string)) {
+	for _, rx := range []*regexp.Regexp{
+		rxServerAction1, rxServerAction2, rxServerAction3,
+		rxServerAction4, rxServerAction5, rxServerAction6,
+	} {
+		for _, m := range rx.FindAllStringSubmatch(text, -1) {
+			if len(m) > 1 {
+				addID(m[1])
+			}
+		}
+	}
+	// Minified / RSC flight: only scan sources that mention consent machinery,
+	// but accept the modern 42-char length (previous scanner missed it).
+	if strings.Contains(text, "submitOAuth2Consent") ||
+		strings.Contains(text, "createServerReference") ||
+		strings.Contains(text, "registerServerReference") ||
+		strings.Contains(text, "oauth2/consent") ||
+		strings.Contains(text, "Next-Action") ||
+		strings.Contains(text, "$ACTION") {
+		for _, m := range rxHexActionID.FindAllStringSubmatch(text, -1) {
+			if len(m) > 1 {
+				addID(m[1])
+			}
+		}
+	}
+}
+
 func discoverConsentActionIDs(ctx context.Context, c *Client, consentURL, html string) []string {
 	var sources []string
 	sources = append(sources, html)
 
-	matches := rxScriptSrc.FindAllStringSubmatch(html, -1)
+	assets := collectConsentAssetURLs(consentURL, html)
 	fetched := 0
-	for _, m := range matches {
-		if len(m) < 2 || fetched >= 16 {
-			continue
+	for _, scriptURL := range assets {
+		if fetched >= maxConsentScriptFetches {
+			break
 		}
-		src := m[1]
-		scriptURL := resolveURL(consentURL, src)
+		if c == nil || c.http == nil {
+			break
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, scriptURL, nil)
 		if err != nil {
 			continue
@@ -438,13 +606,14 @@ func discoverConsentActionIDs(ctx context.Context, c *Client, consentURL, html s
 		}
 		fetched++
 	}
-	c.logDiag("pkce_consent fetched %d script bundles from consent page", fetched)
+	if c != nil {
+		c.logDiag("pkce_consent fetched %d script bundles from consent page", fetched)
+	}
 
-	combined := strings.Join(sources, "\n")
 	var ids []string
 	addID := func(id string) {
-		id = strings.TrimSpace(id)
-		if id == "" {
+		id = strings.TrimSpace(strings.ToLower(id))
+		if id == "" || !isPlausibleActionID(id) {
 			return
 		}
 		for _, existing := range ids {
@@ -455,26 +624,28 @@ func discoverConsentActionIDs(ctx context.Context, c *Client, consentURL, html s
 		ids = append(ids, id)
 	}
 
-	for _, rx := range []*regexp.Regexp{rxServerAction1, rxServerAction2, rxServerAction3, rxServerAction4, rxServerAction5} {
-		for _, m := range rx.FindAllStringSubmatch(combined, -1) {
-			if len(m) > 1 {
-				addID(m[1])
-			}
-		}
-	}
-
 	for _, srcText := range sources {
-		if strings.Contains(srcText, "submitOAuth2Consent") || strings.Contains(srcText, "createServerReference") {
-			for _, m := range rxHex40.FindAllStringSubmatch(srcText, -1) {
-				if len(m) > 1 {
-					addID(m[1])
-				}
-			}
-		}
+		extractActionIDsFromText(srcText, addID)
 	}
 
-	addID(defaultConsentActionID)
-	return ids
+	// Only keep the stale default when nothing live was found.
+	if len(ids) == 0 {
+		addID(defaultConsentActionID)
+	}
+	return rankActionIDs(ids)
+}
+
+func isPlausibleActionID(id string) bool {
+	n := len(id)
+	if n < 40 || n > 64 {
+		return false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html, cookie string, form url.Values) (string, string, bool) {
@@ -502,7 +673,8 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 		return "", cookie, false
 	}
 
-	submitURL := strings.Split(consentURL, "?")[0]
+	// Browser posts to the current document URL, query included.
+	submitURL := serverActionSubmitURL(consentURL)
 	origin := "https://accounts.x.ai"
 	if u, err := url.Parse(consentURL); err == nil && u.Host != "" {
 		origin = u.Scheme + "://" + u.Host
@@ -541,15 +713,23 @@ func submitServerActionConsent(ctx context.Context, c *Client, consentURL, html,
 		cookie = mergeSetCookies(cookie, resp.Header)
 		bodyStr := string(body)
 
-		loc := resp.Header.Get("Location")
+		rawLoc := resp.Header.Get("Location")
+		loc := actionRedirectFromHTTP(origin, resp.Header, rawLoc)
 		tag := actionID
 		if len(tag) > 16 {
 			tag = tag[:16]
 		}
-		c.logDiag("pkce server action %s status=%d loc=%q bodyLen=%d", tag, resp.StatusCode, trimLoc(loc), len(body))
+		c.logDiag("pkce server action %s status=%d loc=%q x-action-redirect=%q bodyLen=%d",
+			tag, resp.StatusCode, trimLoc(rawLoc), trimLoc(resp.Header.Get("X-Action-Redirect")), len(body))
 
 		if strings.Contains(loc, "code=") {
 			return loc, cookie, true
+		}
+		// A callback with error=… is a definitive answer for this action id —
+		// do not treat it as success, but keep trying other ids.
+		if isCallback(loc) {
+			c.logDiag("pkce server action %s callback without code: %q", tag, trimLoc(loc))
+			continue
 		}
 
 		if m := rxCodeJSON.FindStringSubmatch(bodyStr); len(m) > 1 {

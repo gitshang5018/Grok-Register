@@ -150,6 +150,93 @@ func TestDiscoverConsentActionIDs(t *testing.T) {
 	}
 }
 
+// Next.js SERVER_REFERENCE_ID_LENGTH is 42. The previous hex scanner only
+// accepted 40 or 64, so modern consent bundles yielded zero live IDs and the
+// flow fell back to a stale 40-char default that 404s, then a form POST that
+// auth.x.ai answers with access_denied.
+func TestDiscoverConsentActionIDsFinds42CharNextIDs(t *testing.T) {
+	const liveID = "00abcdef1234567890abcdef1234567890abcdef12" // 42 hex chars
+	if len(liveID) != 42 {
+		t.Fatalf("fixture length = %d, want 42", len(liveID))
+	}
+	html := `<html><body><script>` +
+		`self.__next_f.push([1,"createServerReference(\"` + liveID + `\",\"submitOAuth2Consent\")"])` +
+		`</script></body></html>`
+	c := &Client{}
+	ids := discoverConsentActionIDs(context.Background(), c, "https://accounts.x.ai/oauth2/consent", html)
+	found := false
+	for _, id := range ids {
+		if id == liveID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("42-char Next.js action ID not discovered: %v", ids)
+	}
+}
+
+// Production chunks often only embed the bare hex id next to an oauth consent
+// symbol — no createServerReference wrapper survives minification. The scanner
+// must still pick up 42-char ids from that shape.
+func TestDiscoverConsentActionIDsFromMinifiedConsentChunk(t *testing.T) {
+	const liveID = "01fedcba0987654321fedcba0987654321fedcba09"
+	html := `<html><body><script type="text/javascript">` +
+		`e.exports={submitOAuth2Consent:{id:"` + liveID + `",bound:null},deny:1}` +
+		`</script></body></html>`
+	c := &Client{}
+	ids := discoverConsentActionIDs(context.Background(), c, "https://accounts.x.ai/oauth2/consent", html)
+	found := false
+	for _, id := range ids {
+		if id == liveID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("minified consent chunk action ID not discovered: %v", ids)
+	}
+}
+
+// Live 42-char IDs must sort ahead of the hardcoded 40-char default so a
+// working reference is attempted before the known-stale fallback.
+func TestDiscoverConsentActionIDsPrefersLiveOverDefault(t *testing.T) {
+	const liveID = "00abcdef1234567890abcdef1234567890abcdef12"
+	html := `<html><body><script>createServerReference("` + liveID + `")</script></body></html>`
+	c := &Client{}
+	ids := discoverConsentActionIDs(context.Background(), c, "https://accounts.x.ai/oauth2/consent", html)
+	if len(ids) == 0 {
+		t.Fatal("no ids")
+	}
+	if ids[0] != liveID {
+		t.Fatalf("first id = %q, want live 42-char id before stale default; full=%v", ids[0], ids)
+	}
+}
+
+func TestServerActionRedirectFromHeader(t *testing.T) {
+	// Next.js action redirects land in x-action-redirect, not Location.
+	loc := actionRedirectLocation(
+		"https://accounts.x.ai",
+		map[string]string{
+			"X-Action-Redirect": "http://127.0.0.1:56121/callback?code=THECODE&state=ST",
+		},
+		"",
+	)
+	if !strings.Contains(loc, "code=THECODE") {
+		t.Fatalf("x-action-redirect not honored: %q", loc)
+	}
+}
+
+func TestServerActionSubmitURLKeepsQuery(t *testing.T) {
+	// Browser posts the Server Action to the current document URL, query
+	// included. Stripping ?response_type=… drops the OAuth request context.
+	full := "https://accounts.x.ai/oauth2/consent?response_type=code&client_id=CID&state=ST"
+	got := serverActionSubmitURL(full)
+	if got != full {
+		t.Fatalf("submit URL = %q, want full consent URL with query", got)
+	}
+}
+
 func TestResolveURL(t *testing.T) {
 	base := "https://accounts.x.ai/oauth2/consent?response_type=code&client_id=b1a00492"
 	got := resolveURL(base, "/_next/static/chunks/073qnqzc81yfr.js")
