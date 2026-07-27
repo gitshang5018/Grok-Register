@@ -805,6 +805,70 @@ func (c *Client) loadConsentForm(ctx context.Context, consentURL, cookie string)
 	return fields, newCookie, action
 }
 
+// formButton is a submit control scraped from a consent form.
+type formButton struct {
+	Name  string
+	Value string
+	Text  string
+}
+
+var (
+	buttonTagRe = regexp.MustCompile(`(?is)<button\b([^>]*)>(.*?)</button>`)
+	tagStripRe  = regexp.MustCompile(`(?s)<[^>]*>`)
+)
+
+// parseFormButtons scrapes <button> controls. parseHTMLFormFields only reads
+// <input> tags, which is enough for the device consent form — it carries an
+// explicit action=allow|deny hidden input. The authorize-flow consent form has
+// no action input at all, so approval can only be expressed by the submit
+// button's name/value pair, and a form posted without it reads as a denial.
+func parseFormButtons(html string) []formButton {
+	var out []formButton
+	for _, m := range buttonTagRe.FindAllStringSubmatch(html, -1) {
+		attrs, inner := m[1], m[2]
+		text := strings.Join(strings.Fields(tagStripRe.ReplaceAllString(inner, " ")), " ")
+		out = append(out, formButton{
+			Name:  attrValue(attrs, "name"),
+			Value: attrValue(attrs, "value"),
+			Text:  text,
+		})
+	}
+	return out
+}
+
+// approveButton picks the button that grants consent. Denial controls are
+// excluded first so a substring match can never select "拒绝" or "Deny".
+func approveButton(buttons []formButton) (formButton, bool) {
+	for _, b := range buttons {
+		if b.Name == "" {
+			continue // carries nothing when submitted
+		}
+		blob := strings.ToLower(b.Text + " " + b.Value)
+		if strings.Contains(b.Text, "拒绝") || strings.Contains(blob, "deny") ||
+			strings.Contains(blob, "reject") || strings.Contains(blob, "cancel") {
+			continue
+		}
+		if strings.Contains(b.Text, "允许") || strings.Contains(b.Text, "授权") ||
+			strings.Contains(blob, "allow") || strings.Contains(blob, "approve") ||
+			strings.Contains(blob, "authorize") || strings.Contains(blob, "accept") ||
+			strings.Contains(blob, "continue") {
+			return b, true
+		}
+	}
+	return formButton{}, false
+}
+
+func describeButtons(buttons []formButton) string {
+	if len(buttons) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(buttons))
+	for _, b := range buttons {
+		parts = append(parts, fmt.Sprintf("%s=%s(%s)", orDash(b.Name), orDash(b.Value), orDash(b.Text)))
+	}
+	return strings.Join(parts, " | ")
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "-"

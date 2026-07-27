@@ -53,6 +53,54 @@ func TestParseHTMLFormFieldsDoesNotInjectPrincipalID(t *testing.T) {
 	}
 }
 
+func TestParseFormButtonsAndApproveSelection(t *testing.T) {
+	// Shape of the real consent controls: a denial and an approval, with the label
+	// wrapped in spans the way the live page renders it.
+	html := `<form>` +
+		`<button type="submit" name="consent" value="deny"><span aria-hidden="true"></span>拒绝</button>` +
+		`<button type="submit" name="consent" value="approve"><span aria-hidden="true"></span>允许</button>` +
+		`</form>`
+
+	buttons := parseFormButtons(html)
+	if len(buttons) != 2 {
+		t.Fatalf("parsed %d buttons, want 2: %+v", len(buttons), buttons)
+	}
+	if buttons[0].Text != "拒绝" || buttons[1].Text != "允许" {
+		t.Fatalf("button text not extracted from nested markup: %+v", buttons)
+	}
+
+	got, ok := approveButton(buttons)
+	if !ok {
+		t.Fatal("no approval button selected")
+	}
+	if got.Value != "approve" {
+		t.Fatalf("selected %q — must never select the denial control", got.Value)
+	}
+}
+
+func TestApproveButtonSkipsUnnamedAndDenialControls(t *testing.T) {
+	// The device form's buttons carry no name, so they submit nothing and cannot
+	// express approval; that form uses a hidden action input instead.
+	unnamed := []formButton{{Text: "拒绝"}, {Text: "允许"}}
+	if _, ok := approveButton(unnamed); ok {
+		t.Fatal("an unnamed button submits no value and must not be treated as approval")
+	}
+
+	denialOnly := []formButton{{Name: "consent", Value: "deny", Text: "Deny"}}
+	if _, ok := approveButton(denialOnly); ok {
+		t.Fatal("denial control selected as approval")
+	}
+
+	english := []formButton{
+		{Name: "consent", Value: "deny", Text: "Cancel"},
+		{Name: "consent", Value: "approve", Text: "Authorize"},
+	}
+	got, ok := approveButton(english)
+	if !ok || got.Value != "approve" {
+		t.Fatalf("english approval not selected: %+v ok=%v", got, ok)
+	}
+}
+
 func TestAuthorizedBodyIgnoresInlinedI18nCatalog(t *testing.T) {
 	if authorizedBody(nextJSConsentPage) {
 		t.Fatal("pre-approval consent page reported as authorized: the i18n catalog inside " +

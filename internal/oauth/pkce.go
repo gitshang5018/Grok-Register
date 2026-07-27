@@ -287,24 +287,43 @@ func (c *Client) submitConsent(ctx context.Context, consentURL, html, cookie str
 	if action == "" {
 		return "", cookie, fmt.Errorf("pkce_consent_form_missing")
 	}
+	// Forward every field the page defines, empty ones included: a browser submits
+	// principal_id= and referrer= with no value rather than omitting them, and the
+	// page's values for client_id / state / nonce / code_challenge / scope must
+	// travel back unmodified. 'action' is decided below.
 	form := url.Values{}
 	for k, vs := range fields {
-		switch k {
-		case "action", "principal_id":
+		if k == "action" {
 			continue
 		}
-		if len(vs) > 0 && vs[0] != "" {
-			form.Set(k, vs[0])
+		v := ""
+		if len(vs) > 0 {
+			v = vs[0]
 		}
+		form.Set(k, v)
 	}
-	form.Set("action", "allow")
+	// Only force action=allow when the form actually carries that control. The
+	// authorize-flow consent form has no action input — approval rides on the
+	// submit button's name/value instead, and adding a field the form does not
+	// define is not how the page submits.
+	buttons := parseFormButtons(html)
+	c.logDiag("pkce_consent_buttons %s", describeButtons(buttons))
+	if _, hasAction := fields["action"]; hasAction {
+		form.Set("action", "allow")
+	} else if b, ok := approveButton(buttons); ok {
+		form.Set(b.Name, b.Value)
+		c.logDiag("pkce_consent approval via button %s=%s (%s)", b.Name, orDash(b.Value), b.Text)
+	} else {
+		return "", cookie, fmt.Errorf("pkce_consent_no_approval_control buttons=[%s]", describeButtons(buttons))
+	}
 	if form.Get("principal_type") == "" {
 		form.Set("principal_type", "User")
 	}
-	// Empty, deliberately, and sent rather than omitted. The consent bundle computes
-	// principalId as `"Team" === principalType ? teamId : ""`, so consenting as a
-	// User posts principal_id with no value.
-	form.Set("principal_id", "")
+	// Deliberately empty. The consent bundle computes principalId as
+	// `"Team" === principalType ? teamId : ""`, so a User consent posts no value.
+	if !form.Has("principal_id") {
+		form.Set("principal_id", "")
+	}
 	c.logDiag("pkce_consent page identity userId=%s", orDash(extractPrincipalID(html)))
 
 	target := absURL(consentURL, action)
