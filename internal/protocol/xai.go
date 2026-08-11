@@ -33,13 +33,17 @@ const (
 	// Document-aligned Next.js router state tree (URL-encoded at use).
 	DefaultRouterStateTreeJSON = `["",{"children":["(app)",{"children":["(auth)",{"children":["sign-up",{"children":["__PAGE__",{},null,null,0]},null,null,0]},null,null,0]},null,null,0]},null,null,16]`
 	// Fallback next-action id (scraped at runtime when possible).
-	DefaultNextAction = "7f7f6cee188bd9cc17a3fb9dbde4abe224f21af0e3"
+	// Updated 2026-08-11: 7f7f6cee… was removed by an xAI redeploy.
+	DefaultNextAction = "7fb80c3e3a9e9084b6dfd13b67fce9804c2a4fb9c7"
 )
 
 var (
 	siteKeyRe   = regexp.MustCompile(`0x4AAAAAAA[a-zA-Z0-9_-]+`)
-	jsSrcRe     = regexp.MustCompile(`src="(/_next/static/[^"]+\.js)"`)
+	// xAI appends ?dpl=<deploy-id> to every chunk URL since mid-2026; the
+	// optional query suffix keeps scraping working across deployments.
+	jsSrcRe     = regexp.MustCompile(`src="(/_next/static/[^"]+\.js(?:[?#][^"]*)?)"`)
 	hex40Re     = regexp.MustCompile(`[a-fA-F0-9]{40,50}`)
+	dplIDRe     = regexp.MustCompile(`data-dpl-id="([a-f0-9]{40})"`)
 	flightRe    = regexp.MustCompile(`self\.__next_f\.push\(\[1,"(.*?)"\]\)`)
 	castlePKRe1 = regexp.MustCompile(`castlePk\\":\\"([^\\"]+)`)
 	castlePKRe2 = regexp.MustCompile(`castlePk":"([^"]+)"`)
@@ -210,6 +214,12 @@ func (c *Client) FetchConfig() (SignupConfig, error) {
 	if m := siteKeyRe.FindString(html); m != "" {
 		cfg.SiteKey = m
 	}
+	// Current deployment id: its 40-hex value appears in every chunk URL and
+	// must not be mistaken for a Next-Action id.
+	dplID := ""
+	if m := dplIDRe.FindStringSubmatch(html); len(m) > 1 {
+		dplID = m[1]
+	}
 	if pk := scrapeCastlePK(html); pk != "" {
 		cfg.CastlePK = pk
 		cfg.Source += "+castle_pk"
@@ -231,8 +241,14 @@ func (c *Client) FetchConfig() (SignupConfig, error) {
 		if !strings.Contains(js, "createUser") && !strings.Contains(js, "registerUser") && !strings.Contains(js, "emailValidation") {
 			continue
 		}
-		if hexes := hex40Re.FindAllString(js, -1); len(hexes) > 0 {
-			cfg.ActionID = hexes[0]
+		for _, h := range hex40Re.FindAllString(js, -1) {
+			if h == dplID {
+				continue
+			}
+			cfg.ActionID = h
+			break
+		}
+		if cfg.ActionID != "" {
 			cfg.Source += "+scrape_action"
 		}
 	}
