@@ -33,6 +33,7 @@ def find_chrome() -> str:
     for home in homes:
         base = os.path.join(home, ".cloakbrowser")
         matches.extend(glob.glob(os.path.join(base, "chromium-*/chrome")))
+        matches.extend(glob.glob(os.path.join(base, "chromium-*/chrome.exe")))
         matches.extend(
             glob.glob(
                 os.path.join(
@@ -43,6 +44,14 @@ def find_chrome() -> str:
         )
     if matches:
         return sorted(matches)[-1]
+    for p in (
+        "C:/Program Files/Google/Chrome/Application/chrome.exe",
+        "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+    ):
+        if os.path.exists(p):
+            return p
     for p in (
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",

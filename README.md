@@ -460,7 +460,23 @@ go build -o bin\grok.exe .\cmd\grok
 
 **运行前注意事项：**
 
-- **Turnstile**：browser 模式需要 Chrome/Chromium（`CHROME_PATH` 或系统安装）；或用已有的 `REGISTER_PROXY` 代理。
+- **Turnstile（本地 solver，推荐 · 不依赖 Docker）**：优先 `browser` 模式，用本机 Python + Playwright + **CloakBrowser（patched Chromium）**本地解 token。Windows 首次配置（一次性）：
+  ```bat
+  :: 1) 安装 Python 依赖
+  pip install playwright cloakbrowser requests
+
+  :: 2) 下载 CloakBrowser patched Chromium（会自动下载并缓存到 ~\.cloakbrowser\chromium-*\chrome.exe）
+  python -c "import cloakbrowser; print(cloakbrowser.ensure_binary())"
+
+  :: 3) 显式指定装了依赖的 Python（机器上装多个 Python 时 Go 默认可能选到没装的，务必设 GROK_PYTHON）
+  set GROK_PYTHON=C:\Users\xxx\AppData\Local\Programs\Python\Python312\python.exe
+  set TURNSTILE_PROVIDER=browser
+  set TURNSTILE_MODE=offscreen
+  set CLEARANCE_ENABLED=0
+  ```
+  之后 `grok start` 会自动启用 browser-pool（并行 CloakBrowser 槽）→ 一次性 mint → chromedp 兜底。
+  不用 Playwright 时最低可只跑 `TURNSTILE_PROVIDER=chromedp` + `CHROME_PATH=C:\...\chrome.exe`（纯 Go，但通过率通常低于 CloakBrowser）。
+
 - **clearance / WARP 清障栈依赖 Docker**，Windows 上请用 **WSL2 + Docker Desktop**，或直接：
   ```env
   CLEARANCE_ENABLED=0
