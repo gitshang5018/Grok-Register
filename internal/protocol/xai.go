@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"crypto/rand"
@@ -808,20 +809,28 @@ func isCloudflare(status int, body string, h http.Header) bool {
 	return false
 }
 
+// readBody reads a response body. tls-client already transparently
+// decompresses gzip bodies but keeps the "Content-Encoding: gzip" header, so
+// blindly wrapping resp.Body in gzip.NewReader fails and consumes/poisons the
+// already-decompressed stream (yielding an empty body). Only decompress when
+// the stream actually starts with the gzip magic 0x1f 0x8b.
 func readBody(resp *http.Response) (string, error) {
 	if resp == nil || resp.Body == nil {
 		return "", nil
 	}
 	defer resp.Body.Close()
-	var r io.Reader = resp.Body
-	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-		gz, err := gzip.NewReader(resp.Body)
+	const limit = 8 << 20
+	br := bufio.NewReaderSize(resp.Body, 4096)
+	head, _ := br.Peek(2)
+	var r io.Reader = br
+	if len(head) == 2 && head[0] == 0x1f && head[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
 		if err == nil {
 			defer gz.Close()
 			r = gz
 		}
 	}
-	b, err := io.ReadAll(io.LimitReader(r, 8<<20))
+	b, err := io.ReadAll(io.LimitReader(r, limit))
 	return string(b), err
 }
 
