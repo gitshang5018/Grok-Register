@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -315,7 +316,11 @@ func cmdConfig() error {
 	if editor != "" {
 		candidates = append(candidates, editor)
 	}
-	candidates = append(candidates, "nano", "vim", "vi", "nvim", "code", "open")
+	if runtime.GOOS == "windows" {
+		candidates = append(candidates, "notepad", "code")
+	} else {
+		candidates = append(candidates, "nano", "vim", "vi", "nvim", "code", "open")
+	}
 	var lastErr error
 	for _, ed := range candidates {
 		// `open` is macOS; use -t for textedit or just open path
