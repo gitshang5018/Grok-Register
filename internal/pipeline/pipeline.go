@@ -390,6 +390,7 @@ func (e *Engine) run(ctx context.Context) error {
 		Path:       cfg.Sub2APIPath,
 		TimeoutSec: cfg.Sub2APITimeoutSec,
 		Retries:    cfg.Sub2APIRetries,
+		GroupIDs:   cfg.Sub2APIGroupIDs,
 	}, func(f string, a ...any) {
 		log.Infof(f, a...)
 	})

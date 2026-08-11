@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,9 +18,12 @@ type Config struct {
 	Enabled    bool
 	BaseURL    string // e.g. http://127.0.0.1:8000
 	Key        string
-	Path       string // e.g. /api/v1/admin/accounts/import
+	Path       string // e.g. /api/v1/admin/accounts/batch
 	TimeoutSec int
 	Retries    int
+	// GroupIDs: comma-separated sub2api group IDs to assign imported accounts
+	// to (mapped to CreateAccountRequest.group_ids). Empty = keep server default.
+	GroupIDs string
 }
 
 type Result struct {
@@ -50,7 +54,7 @@ func NewUploader(cfg Config, logf func(string, ...any)) *Uploader {
 	}
 	path := strings.TrimSpace(cfg.Path)
 	if path == "" {
-		path = "/api/v1/admin/accounts/import"
+		path = "/api/v1/admin/accounts/batch"
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
@@ -106,7 +110,9 @@ func (u *Uploader) ImportDocument(doc cpa.Document) Result {
 		return res
 	}
 
-	payload := map[string]any{
+	groupIDs := parseGroupIDs(u.cfg.GroupIDs)
+
+	account := map[string]any{
 		"platform":      "grok",
 		"provider":      "grok",
 		"type":          "xai",
@@ -117,6 +123,19 @@ func (u *Uploader) ImportDocument(doc cpa.Document) Result {
 		"id_token":      doc.IDToken,
 		"expires_in":    doc.ExpiresIn,
 		"credentials":   doc,
+	}
+	if len(groupIDs) > 0 {
+		account["group_ids"] = groupIDs
+	}
+
+	// sub2api exposes two import shapes:
+	//   - /api/v1/admin/accounts/batch      -> {"accounts":[...]}
+	//   - legacy import path                -> single account object
+	var payload any
+	if strings.Contains(u.cfg.Path, "/batch") {
+		payload = map[string]any{"accounts": []any{account}}
+	} else {
+		payload = account
 	}
 
 	rawPayload, err := json.Marshal(payload)
@@ -186,4 +205,25 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// parseGroupIDs splits a comma-separated string of group IDs (e.g. "3,5,12")
+// into a []int64. Empty input yields nil. Non-numeric tokens are skipped.
+func parseGroupIDs(raw string) []int64 {
+	var out []int64
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

@@ -104,6 +104,9 @@ type Config struct {
 	Sub2APIPath       string
 	Sub2APITimeoutSec int
 	Sub2APIRetries    int
+	// Sub2APIGroupIDs: comma-separated group IDs to assign imported accounts to
+	// (sub2api CreateAccountRequest.group_ids). Empty = default/no group.
+	Sub2APIGroupIDs string
 }
 
 func Defaults() Config {
@@ -155,7 +158,7 @@ func Defaults() Config {
 		CPAUploadMode:           "multipart",
 		Sub2APIEnabled:          false,
 		Sub2APIBaseURL:          "http://127.0.0.1:8000",
-		Sub2APIPath:             "/api/v1/admin/accounts/import",
+		Sub2APIPath:             "/api/v1/admin/accounts/batch",
 		Sub2APITimeoutSec:       30,
 		Sub2APIRetries:          2,
 	}
@@ -308,6 +311,7 @@ func Save(path string, cfg Config) error {
 	b.WriteString(fmt.Sprintf("SUB2API_PATH=%s\n", cfg.Sub2APIPath))
 	b.WriteString(fmt.Sprintf("SUB2API_TIMEOUT_SEC=%d\n", cfg.Sub2APITimeoutSec))
 	b.WriteString(fmt.Sprintf("SUB2API_RETRIES=%d\n", cfg.Sub2APIRetries))
+	b.WriteString(fmt.Sprintf("SUB2API_GROUP_IDS=%s\n", cfg.Sub2APIGroupIDs))
 	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
@@ -663,6 +667,9 @@ func applyMap(cfg *Config, env map[string]string) {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Sub2APIRetries = n
 		}
+	}
+	if v, ok := env["SUB2API_GROUP_IDS"]; ok {
+		cfg.Sub2APIGroupIDs = strings.TrimSpace(v)
 	}
 }
 
