@@ -425,6 +425,16 @@ func parseEnvFile(content string) map[string]string {
 		}
 		k := strings.TrimSpace(line[:i])
 		v := strings.TrimSpace(line[i+1:])
+		// Strip inline comments (`KEY=value # comment`); quoted values keep
+		// the # (e.g. passwords). Only strip when # is preceded by whitespace
+		// so URLs like http://host/path#frag survive.
+		if !strings.HasPrefix(v, `"`) && !strings.HasPrefix(v, `'`) {
+			if j := strings.Index(v, " #"); j >= 0 {
+				v = strings.TrimSpace(v[:j])
+			} else if strings.HasPrefix(v, "#") {
+				v = ""
+			}
+		}
 		v = strings.Trim(v, `"'`)
 		out[k] = v
 	}
