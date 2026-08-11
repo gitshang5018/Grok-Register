@@ -5,9 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/grok-free-register/grok-reg/internal/home"
@@ -34,9 +34,12 @@ func PIDAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	// Signal 0 checks existence without killing.
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	// On Unix, signal 0 probes existence. On Windows, proc.Signal(0) is
+	// unsupported, so fall back to an OpenProcess probe.
+	if runtime.GOOS != "windows" {
+		return proc.Signal(os.Signal(pidAliveSignal)) == nil
+	}
+	return pidAliveFallback(proc)
 }
 
 func ReadPID(path string) (int, error) {
@@ -71,12 +74,12 @@ func TryLock(lockPath string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockFile(f); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("注册机已经在运行（无法获取锁）")
 	}
 	unlock := func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = unlockFile(f)
 		_ = f.Close()
 	}
 	return unlock, nil
@@ -105,8 +108,8 @@ func StartBackground(target, threads int, runID string) (int, error) {
 	cmd.Stderr = nil
 	cmd.Stdin = nil
 	cmd.Env = os.Environ()
-	// Detach from controlling terminal.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// Detach from controlling terminal (platform-specific).
+	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
@@ -140,7 +143,7 @@ func Stop(paths home.Paths) error {
 		return err
 	}
 	// Graceful first — pipeline may drain OAuth / CPA upload before exit.
-	_ = proc.Signal(syscall.SIGTERM)
+	requestTerminate(proc)
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if !PIDAlive(pid) {
@@ -149,7 +152,7 @@ func Stop(paths home.Paths) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	_ = proc.Signal(syscall.SIGKILL)
+	requestKill(proc)
 	time.Sleep(300 * time.Millisecond)
 	ClearPID(paths.PID)
 	return nil

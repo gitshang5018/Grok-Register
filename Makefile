@@ -6,7 +6,7 @@ PREFIX?=/usr/local
 BINDIR?=$(PREFIX)/bin
 SHAREDIR?=$(PREFIX)/share/grok-reg
 
-.PHONY: build install uninstall clean test run
+.PHONY: build build-windows install uninstall clean test run
 
 # Resolve go even when sudo drops PATH (common: /usr/local/go/bin).
 GO ?= $(shell command -v go 2>/dev/null || true)
@@ -21,6 +21,12 @@ build:
 		exit 1; \
 	fi
 	$(GO) build -ldflags "-s -w -X main.version=$(VERSION)" -o bin/$(APP) ./cmd/grok
+
+# Windows 目标：在任意平台交叉编译 Windows amd64 可执行文件（bin/$(APP).exe）。
+# 也可在 Windows 本机直接:  go build -o bin/$(APP).exe ./cmd/grok
+build-windows:
+	GOOS=windows GOARCH=amd64 $(GO) build -ldflags "-s -w -X main.version=$(VERSION)" -o bin/$(APP).exe ./cmd/grok
+	@echo "built: bin/$(APP).exe (Windows amd64)"
 
 # 不强制 rebuild：已有 bin/$(APP) 时直接安装（避免 sudo 丢 PATH 再编一次失败）
 install:

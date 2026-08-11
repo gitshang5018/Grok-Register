@@ -444,6 +444,32 @@ sudo apt-get install -y xvfb
 - **推荐一键**：先装 Homebrew + Docker Desktop，再 `curl .../install.sh | bash`（见上文）  
 - 手动：`brew install go python`，venv + CloakBrowser，`make build && make install PREFIX=$HOME/.local`  
 - 清障：打开 Docker Desktop 后 `cd ~/Grok-Register/clearance && docker compose up -d`
+
+### Windows 备注
+
+CLI 已支持 Windows（`internal/daemon` 及 castle/turnstile 均已做平台分派）。可用两种方式构建：
+
+```bat
+:: 方式一：任意平台交叉编译（在 repo 根目录，需已安装 Go）
+make build-windows
+:: -> 产出 bin\grok.exe
+
+:: 方式二：Windows 本机直接编译
+go build -o bin\grok.exe .\cmd\grok
+```
+
+**运行前注意事项：**
+
+- **Turnstile**：browser 模式需要 Chrome/Chromium（`CHROME_PATH` 或系统安装）；或用已有的 `REGISTER_PROXY` 代理。
+- **clearance / WARP 清障栈依赖 Docker**，Windows 上请用 **WSL2 + Docker Desktop**，或直接：
+  ```env
+  CLEARANCE_ENABLED=0
+  REGISTER_PROXY=http://127.0.0.1:7890   # 你自己的 Clash 等 HTTP 代理
+  ```
+- **后台运行**：`grok start` 会用 `DETACHED_PROCESS` 启动后台 worker 并写 PID；`grok stop` 用 `taskkill`（先温和再 `/F /T`）结束。
+- 数据/日志/输出目录不变：`%USERPROFILE%\.grok\`（或 `GROK_HOME`）。
+- 命令名：默认 `grok`，可用 `grok.exe` 调用。在 PowerShell 用 `.\bin\grok.exe` 或把 `bin` 加入 `PATH`。
+
 ---
 
 ## 命令一览
